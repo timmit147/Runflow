@@ -13,14 +13,14 @@ body { margin: 0; background: #0b1220; font-family: system-ui; color: white; ove
 .bigbtn { width: 180px; height: 180px; border-radius: 50%; border: none; font-size: 20px; font-weight: bold; background: white; color: black; cursor: pointer; }
 .timer { margin-top: 15px; font-size: 28px; }
 .list { width: 80%; max-width: 400px; display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow-y: auto; margin-top: 60px; }
-.item { padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.05); cursor: pointer; display: flex; justify-content: space-between; }
-.wrap { width: 360px; height: 360px; margin-top: 50px; }
+.item { padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.05); cursor: pointer; }
+.wrap { width: 360px; height: 360px; margin-top: 20px; position: relative; }
 svg { width: 100%; height: 100%; }
 .line { fill: none; stroke: white; stroke-width: 2; opacity: 0.5; }
-.line-active { stroke: #4ade80; stroke-width: 4; }
+.line-green { fill: none; stroke: #4ade80; stroke-width: 4; }
 .dot { fill: white; cursor: pointer; }
 .dot-selected { fill: #4ade80; r: 5; }
-.info { position: absolute; bottom: 30px; width: 80%; text-align: left; font-size: 13px; background: rgba(0,0,0,0.8); padding: 15px; border-radius: 8px; border: 1px solid #444; }
+.info { position: absolute; bottom: 30px; width: 80%; text-align: left; font-size: 13px; background: rgba(0,0,0,0.8); padding: 15px; border-radius: 8px; border: 1px solid #444; z-index: 10; }
 </style>
 </head>
 <body>
@@ -40,11 +40,11 @@ svg { width: 100%; height: 100%; }
 
 <div id="view" class="screen">
   <div class="wrap"><svg id="svg" viewBox="0 0 100 100"></svg></div>
-  <div class="info" id="info">Klik op een stip voor details</div>
+  <div class="info" id="info">Klik op een punt</div>
 </div>
 
 <script>
-let state="run", running=false, startTime, interval, tempRun, watchId, selectedPoints=[];
+let running=false, startTime, interval, tempRun, watchId, selectedPoints=[];
 
 function nav(s){
   document.querySelectorAll(".screen").forEach(x=>x.classList.remove("active"));
@@ -55,9 +55,8 @@ function nav(s){
 
 function getDistance(p1, p2) {
   const R = 6371e3;
-  const r1 = p1.lat * Math.PI/180, r2 = p2.lat * Math.PI/180;
   const dLat = (p2.lat-p1.lat)*Math.PI/180, dLon = (p2.lon-p1.lon)*Math.PI/180;
-  const a = Math.sin(dLat/2)**2 + Math.cos(r1)*Math.cos(r2)*Math.sin(dLon/2)**2;
+  const a = Math.sin(dLat/2)**2 + Math.cos(p1.lat*Math.PI/180)*Math.cos(p2.lat*Math.PI/180)*Math.sin(dLon/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
@@ -99,7 +98,7 @@ function loadRuns(){
   runs.forEach((r,i)=>{
     let div=document.createElement("div");
     div.className="item";
-    div.innerHTML=`Run ${runs.length-i}`;
+    div.innerText=`Run ${runs.length-i}`;
     div.onclick=()=>showRun(r);
     div.oncontextmenu=(e)=>{
       e.preventDefault();
@@ -119,30 +118,46 @@ function showRun(run){
   const mapX=l=>((l-minLon)/(maxLon-minLon||1))*80+10;
   const mapY=l=>((maxLat-l)/(maxLat-minLat||1))*80+10;
 
-  let path="M";
+  let path="M ";
   run.points.forEach((p,i)=>{
-    path += (i>0?" L ":"") + mapX(p.lon) + "," + mapY(p.lat);
+    path += (i===0?"":"L ") + mapX(p.lon) + " " + mapY(p.lat) + " ";
+  });
+
+  let lineEl=document.createElementNS("http://www.w3.org/2000/svg","path");
+  lineEl.setAttribute("d",path); lineEl.setAttribute("class","line");
+  svg.appendChild(lineEl);
+
+  run.points.forEach((p,i)=>{
     let c=document.createElementNS("http://www.w3.org/2000/svg","circle");
     c.setAttribute("cx",mapX(p.lon)); c.setAttribute("cy",mapY(p.lat)); c.setAttribute("r",2); c.setAttribute("class","dot");
     c.onclick=()=>{
+      if(selectedPoints.length>=2) { 
+          selectedPoints=[]; 
+          document.querySelectorAll('.dot-selected').forEach(d=>d.classList.remove('dot-selected'));
+          let greens = svg.querySelectorAll('.line-green');
+          greens.forEach(g => g.remove());
+      }
       selectedPoints.push(p);
-      if(selectedPoints.length>2) { selectedPoints.shift(); document.querySelectorAll('.dot-selected').forEach(d=>d.classList.remove('dot-selected')); }
       c.classList.add("dot-selected");
+      
       let info=document.getElementById("info");
-      let timeStr = new Date(run.start + p.t).toLocaleTimeString();
-      info.innerHTML=`Tijd: ${timeStr}<br><a href="https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}" target="_blank" style="color: #4ade80;">Bekijk op Maps</a>`;
+      info.innerHTML=`Tijd: ${Math.floor(p.t/1000)}s<br><a href="https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}" target="_blank" style="color:#4ade80;">Bekijk op Maps</a>`;
       
       if(selectedPoints.length===2){
         let d=getDistance(selectedPoints[0], selectedPoints[1]);
-        let dt=(Math.abs(selectedPoints[1].t-selectedPoints[0].t))/1000;
-        info.innerHTML+=`<br>Afstand tussen punten: ${d.toFixed(0)}m, Tijd: ${dt.toFixed(0)}s`;
+        let dt=Math.abs(selectedPoints[1].t-selectedPoints[0].t)/1000;
+        info.innerHTML+=`<br>Afstand: ${d.toFixed(0)}m, Tijd: ${dt.toFixed(0)}s`;
+        
+        // Teken groene lijn
+        let gLine=document.createElementNS("http://www.w3.org/2000/svg","line");
+        gLine.setAttribute("x1", mapX(selectedPoints[0].lon)); gLine.setAttribute("y1", mapY(selectedPoints[0].lat));
+        gLine.setAttribute("x2", mapX(selectedPoints[1].lon)); gLine.setAttribute("y2", mapY(selectedPoints[1].lat));
+        gLine.setAttribute("class","line-green");
+        svg.appendChild(gLine);
       }
     };
     svg.appendChild(c);
   });
-  let pathEl=document.createElementNS("http://www.w3.org/2000/svg","path");
-  pathEl.setAttribute("d",path); pathEl.setAttribute("class","line");
-  svg.insertBefore(pathEl, svg.firstChild);
 }
 
 loadRuns();

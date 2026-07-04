@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>RunFlow</title>
+
+<link rel="manifest" href="manifest.json">
+
+<style>
+body {
+  margin: 0;
+  background: #0b1220;
+  font-family: system-ui;
+  color: white;
+  overflow: hidden;
+}
+
+/* HEADER */
+.header {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  right: 20px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.btn {
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.2);
+  cursor: pointer;
+}
+
+/* SCREENS */
+.screen {
+  display: none;
+  height: 100vh;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+}
+.active { display: flex; }
+
+.bigbtn {
+  width: 180px;
+  height: 180px;
+  border-radius: 50%;
+  border: none;
+  font-size: 20px;
+  font-weight: bold;
+  background: white;
+  color: black;
+}
+
+.timer {
+  margin-top: 15px;
+  font-size: 28px;
+}
+
+.list {
+  width: 80%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.item {
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.05);
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+}
+
+.wrap {
+  width: 360px;
+  height: 360px;
+}
+
+svg { width: 100%; height: 100%; }
+
+.line {
+  fill: none;
+  stroke: white;
+  stroke-width: 1;
+}
+
+.dot {
+  fill: white;
+}
+
+.info {
+  position: absolute;
+  bottom: 30px;
+  width: 100%;
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+.popup {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.box {
+  background: #111a2e;
+  padding: 20px;
+  border-radius: 12px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="header">
+  <div id="leftBtn" class="btn" onclick="nav('routes')">Routes</div>
+  <div id="title">RunFlow</div>
+</div>
+
+<!-- RUN -->
+<div id="run" class="screen active">
+  <button class="bigbtn" onclick="toggleRun()" id="btn">START</button>
+  <div class="timer" id="timer">00:00</div>
+</div>
+
+<!-- ROUTES -->
+<div id="routes" class="screen">
+  <div class="list" id="list"></div>
+</div>
+
+<!-- VIEW -->
+<div id="view" class="screen">
+  <div class="wrap">
+    <svg id="svg" viewBox="0 0 100 100"></svg>
+  </div>
+  <div class="info" id="info"></div>
+</div>
+
+<!-- POPUP -->
+<div id="popup" class="popup">
+  <div class="box">
+    <div>Stop run?</div>
+    <button onclick="confirmStop(true)">Ja</button>
+    <button onclick="confirmStop(false)">Nee</button>
+  </div>
+</div>
+
+<script>
+let state="run";
+let running=false;
+let startTime;
+let interval;
+let tempRun;
+
+/* NAV */
+function nav(s){
+  state=s;
+  document.querySelectorAll(".screen").forEach(x=>x.classList.remove("active"));
+  document.getElementById(s).classList.add("active");
+  updateHeader();
+}
+
+/* HEADER */
+function updateHeader(){
+  const left=document.getElementById("leftBtn");
+  const title=document.getElementById("title");
+
+  if(state==="run"){
+    left.innerText="Routes";
+    left.onclick=()=>nav("routes");
+    title.innerText="RunFlow";
+  }
+
+  if(state==="routes"){
+    left.innerText="← Start";
+    left.onclick=()=>nav("run");
+    title.innerText="Routes";
+  }
+
+  if(state==="view"){
+    left.innerText="← Back";
+    left.onclick=()=>nav("routes");
+    title.innerText="";
+  }
+}
+
+/* RUN */
+function toggleRun(){
+  if(!running) startRun();
+  else document.getElementById("popup").style.display="flex";
+}
+
+function startRun(){
+  running=true;
+  document.getElementById("btn").innerText="STOP";
+
+  startTime=Date.now();
+
+  interval=setInterval(()=>{
+    let s=Math.floor((Date.now()-startTime)/1000);
+    let m=Math.floor(s/60);
+    s%=60;
+
+    document.getElementById("timer").innerText=
+      String(m).padStart(2,'0')+":"+String(s).padStart(2,'0');
+  },1000);
+
+  tempRun={start:Date.now(),points:[]};
+
+  window.tracker=setInterval(()=>{
+    tempRun.points.push({
+      x:Math.random()*100,
+      y:Math.random()*100,
+      t:Date.now()-startTime
+    });
+  },1000);
+}
+
+function confirmStop(ok){
+  document.getElementById("popup").style.display="none";
+  if(!ok) return;
+  stopRun();
+}
+
+function stopRun(){
+  running=false;
+  document.getElementById("btn").innerText="START";
+
+  clearInterval(interval);
+  clearInterval(window.tracker);
+
+  let runs=JSON.parse(localStorage.getItem("runs")||"[]");
+
+  tempRun.end=Date.now();
+  runs.unshift(tempRun);
+
+  localStorage.setItem("runs",JSON.stringify(runs));
+
+  document.getElementById("timer").innerText="00:00";
+
+  showRun(tempRun);
+}
+
+/* LIST */
+function loadRuns(){
+  let runs=JSON.parse(localStorage.getItem("runs")||"[]");
+  const list=document.getElementById("list");
+  list.innerHTML="";
+
+  runs.forEach((r,i)=>{
+    let div=document.createElement("div");
+    div.className="item";
+    let t=((r.end-r.start)/1000).toFixed(0);
+    div.innerHTML=`Run ${i+1} <span>${t}s</span>`;
+    div.onclick=()=>showRun(r);
+    list.appendChild(div);
+  });
+}
+
+/* VIEW */
+function showRun(run){
+  nav("view");
+
+  const svg=document.getElementById("svg");
+  svg.innerHTML="";
+
+  let pts=run.points;
+  if(!pts.length) return;
+
+  let xs=pts.map(p=>p.x);
+  let ys=pts.map(p=>p.y);
+
+  let minX=Math.min(...xs), maxX=Math.max(...xs);
+  let minY=Math.min(...ys), maxY=Math.max(...ys);
+
+  const pad=10;
+
+  const mapX=x=>((x-minX)/(maxX-minX||1))*(100-pad*2)+pad;
+  const mapY=y=>((y-minY)/(maxY-minY||1))*(100-pad*2)+pad;
+
+  let path="";
+
+  pts.forEach((p,i)=>{
+    path+=(i===0?"M":"L")+mapX(p.x)+" "+mapY(p.y)+" ";
+  });
+
+  let line=document.createElementNS("http://www.w3.org/2000/svg","path");
+  line.setAttribute("d",path);
+  line.setAttribute("class","line");
+  svg.appendChild(line);
+
+  pts.forEach(p=>{
+    let c=document.createElementNS("http://www.w3.org/2000/svg","circle");
+    c.setAttribute("cx",mapX(p.x));
+    c.setAttribute("cy",mapY(p.y));
+    c.setAttribute("r",2);
+    c.setAttribute("class","dot");
+    svg.appendChild(c);
+  });
+
+  let t=((run.end-run.start)/1000).toFixed(0);
+  document.getElementById("title").innerText=`${t}s`;
+}
+
+/* INIT */
+updateHeader();
+loadRuns();
+</script>
+
+</body>
+</html>

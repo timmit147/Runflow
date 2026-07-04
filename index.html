@@ -4,24 +4,23 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
 <title>RunFlow</title>
-<link rel="manifest" href="manifest.json">
 <style>
 body { margin: 0; background: #0b1220; font-family: system-ui; color: white; overflow: hidden; }
-.header { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; font-size: 14px; font-weight: bold; }
-.btn { padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); cursor: pointer; }
+.header { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: flex-start; }
+.btn { padding: 10px 20px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); cursor: pointer; background: transparent; color: white; }
 .screen { display: none; height: 100vh; width: 100%; align-items: center; justify-content: center; flex-direction: column; }
 .active { display: flex; }
 .bigbtn { width: 180px; height: 180px; border-radius: 50%; border: none; font-size: 20px; font-weight: bold; background: white; color: black; cursor: pointer; }
 .timer { margin-top: 15px; font-size: 28px; }
-.list { width: 80%; max-width: 400px; display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow-y: auto; }
+.list { width: 80%; max-width: 400px; display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow-y: auto; margin-top: 60px; }
 .item { padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.05); cursor: pointer; display: flex; justify-content: space-between; }
-.wrap { width: 360px; height: 360px; }
+.wrap { width: 360px; height: 360px; margin-top: 50px; }
 svg { width: 100%; height: 100%; }
 .line { fill: none; stroke: white; stroke-width: 2; opacity: 0.5; }
 .line-active { stroke: #4ade80; stroke-width: 4; }
 .dot { fill: white; cursor: pointer; }
 .dot-selected { fill: #4ade80; r: 5; }
-.info { position: absolute; bottom: 30px; width: 80%; text-align: left; font-size: 13px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; }
+.info { position: absolute; bottom: 30px; width: 80%; text-align: left; font-size: 13px; background: rgba(0,0,0,0.8); padding: 15px; border-radius: 8px; border: 1px solid #444; }
 </style>
 </head>
 <body>
@@ -32,7 +31,7 @@ svg { width: 100%; height: 100%; }
 
 <div id="run" class="screen active">
   <button class="bigbtn" onclick="toggleRun()" id="btn">START</button>
-  <div class="timer" id="timer">00:00:00</div>
+  <div class="timer" id="timer">00:00</div>
 </div>
 
 <div id="routes" class="screen">
@@ -41,7 +40,7 @@ svg { width: 100%; height: 100%; }
 
 <div id="view" class="screen">
   <div class="wrap"><svg id="svg" viewBox="0 0 100 100"></svg></div>
-  <div class="info" id="info">Klik op een stip</div>
+  <div class="info" id="info">Klik op een stip voor details</div>
 </div>
 
 <script>
@@ -52,11 +51,6 @@ function nav(s){
   document.getElementById(s).classList.add("active");
   document.getElementById("navBtn").innerText = (s==="run" ? "Routes" : "Start");
   document.getElementById("navBtn").onclick = () => nav(s==="run" ? "routes" : "run");
-}
-
-function formatTime(ms) {
-  let d = new Date(startTime + ms);
-  return d.toLocaleTimeString('nl-NL');
 }
 
 function getDistance(p1, p2) {
@@ -75,7 +69,7 @@ function startRun(){
   interval=setInterval(()=>{
     let s=Math.floor((Date.now()-startTime)/1000);
     let m=Math.floor(s/60); s%=60;
-    document.getElementById("timer").innerText=new Date(Date.now()).toLocaleTimeString();
+    document.getElementById("timer").innerText = String(m).padStart(2,'0') + ":" + String(s).padStart(2,'0');
   },1000);
   watchId=navigator.geolocation.watchPosition(p=>{
     tempRun.points.push({lat:p.coords.latitude, lon:p.coords.longitude, t:Date.now()-startTime});
@@ -93,6 +87,7 @@ function toggleRun(){
     runs.unshift(tempRun);
     localStorage.setItem("runs", JSON.stringify(runs));
     document.getElementById("btn").innerText="START";
+    document.getElementById("timer").innerText="00:00";
     nav("routes");
   }
 }
@@ -124,23 +119,30 @@ function showRun(run){
   const mapX=l=>((l-minLon)/(maxLon-minLon||1))*80+10;
   const mapY=l=>((maxLat-l)/(maxLat-minLat||1))*80+10;
 
+  let path="M";
   run.points.forEach((p,i)=>{
+    path += (i>0?" L ":"") + mapX(p.lon) + "," + mapY(p.lat);
     let c=document.createElementNS("http://www.w3.org/2000/svg","circle");
     c.setAttribute("cx",mapX(p.lon)); c.setAttribute("cy",mapY(p.lat)); c.setAttribute("r",2); c.setAttribute("class","dot");
     c.onclick=()=>{
       selectedPoints.push(p);
-      if(selectedPoints.length>2) selectedPoints.shift();
+      if(selectedPoints.length>2) { selectedPoints.shift(); document.querySelectorAll('.dot-selected').forEach(d=>d.classList.remove('dot-selected')); }
       c.classList.add("dot-selected");
       let info=document.getElementById("info");
-      info.innerHTML=`Tijd: ${formatTime(p.t)}<br><a href="https://www.google.com/maps?q=${p.lat},${p.lon}" target="_blank">Bekijk op Maps</a>`;
+      let timeStr = new Date(run.start + p.t).toLocaleTimeString();
+      info.innerHTML=`Tijd: ${timeStr}<br><a href="https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}" target="_blank" style="color: #4ade80;">Bekijk op Maps</a>`;
+      
       if(selectedPoints.length===2){
         let d=getDistance(selectedPoints[0], selectedPoints[1]);
-        let dt=(selectedPoints[1].t-selectedPoints[0].t)/1000;
-        info.innerHTML+=`<br>Afstand: ${d.toFixed(0)}m, Tijd: ${dt.toFixed(0)}s`;
+        let dt=(Math.abs(selectedPoints[1].t-selectedPoints[0].t))/1000;
+        info.innerHTML+=`<br>Afstand tussen punten: ${d.toFixed(0)}m, Tijd: ${dt.toFixed(0)}s`;
       }
     };
     svg.appendChild(c);
   });
+  let pathEl=document.createElementNS("http://www.w3.org/2000/svg","path");
+  pathEl.setAttribute("d",path); pathEl.setAttribute("class","line");
+  svg.insertBefore(pathEl, svg.firstChild);
 }
 
 loadRuns();

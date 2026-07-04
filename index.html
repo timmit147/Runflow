@@ -7,35 +7,45 @@
 <link rel="manifest" href="manifest.json">
 <style>
 body { margin: 0; background: #0b1220; font-family: system-ui; color: white; overflow: hidden; }
-.header { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; font-size: 14px; font-weight: bold; z-index: 5; transition: opacity .3s; }
-#title { opacity: 0.8; }
+.header { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; font-weight: bold; z-index: 5; transition: opacity .3s; }
+.actions { display: flex; gap: 8px; }
 .btn { padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); cursor: pointer; }
 .screen { display: none; height: 100vh; width: 100%; align-items: center; justify-content: center; flex-direction: column; box-sizing: border-box; }
 .active { display: flex; }
 .bigbtn { width: 180px; height: 180px; border-radius: 50%; border: none; font-size: 20px; font-weight: bold; background: white; color: black; cursor: pointer; transition: opacity .3s; }
 .timer { margin-top: 15px; font-size: 28px; font-variant-numeric: tabular-nums; transition: opacity .3s; }
 .list { width: 80%; max-width: 400px; display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow-y: auto; }
-.item { padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.05); cursor: pointer; display: flex; justify-content: space-between; user-select: none; -webkit-user-select: none; touch-action: pan-y; }
+.item { padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.05); cursor: pointer; display: flex; justify-content: space-between; user-select: none; -webkit-user-select: none; }
 .wrap { width: 360px; height: 360px; }
-svg { width: 100%; height: 100%; }
+svg { width: 100%; height: 100%; cursor: crosshair; }
 .line { fill: none; stroke: white; stroke-width: 1.5; opacity: 0.4; }
 .line-active { fill: none; stroke: #4ade80; stroke-width: 3; }
-.dot { fill: white; cursor: pointer; }
+.dot { fill: white; }
 .dot-selected { fill: #4ade80; }
-.info { position: absolute; bottom: 30px; width: 80%; max-width: 400px; text-align: left; font-size: 13px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; line-height: 1.6; min-height: 14px; }
+.info { position: absolute; bottom: 30px; width: 80%; max-width: 400px; text-align: left; font-size: 13px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; line-height: 1.6; display: none; }
 .info a { color: #4ade80; }
 
-/* Donker scherm tijdens het lopen (batterijbesparing) */
-body.dim .header,
-body.dim .timer,
-body.dim .bigbtn { opacity: 0; pointer-events: none; }
+/* Donker scherm tijdens het lopen (batterijbesparing): een zwarte overlay boven alles */
+#dimOverlay {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  z-index: 999;
+  display: none;
+}
+body.dim #dimOverlay { display: block; }
 </style>
 </head>
 <body>
 
+<div id="dimOverlay"></div>
+
 <div class="header">
-  <div id="title">RunFlow</div>
   <div id="navBtn" class="btn">Routes</div>
+  <div class="actions">
+    <div id="exportBtn" class="btn" style="display:none;">Export</div>
+    <div id="deleteBtn" class="btn" style="display:none;">Verwijderen</div>
+  </div>
 </div>
 
 <div id="run" class="screen active">
@@ -58,8 +68,9 @@ body.dim .bigbtn { opacity: 0; pointer-events: none; }
 <script>
 let running = false, startTime, interval, tempRun, watchId;
 let selected = [];
-let currentRunPoints = [];
+let currentRun = null;
 let mapXFn, mapYFn;
+let dotEls = [];
 
 /* ---------- Helpers ---------- */
 function pad(n){ return n.toString().padStart(2,'0'); }
@@ -84,21 +95,24 @@ function getDistance(p1, p2) {
 function nav(screen){
   document.querySelectorAll(".screen").forEach(x=>x.classList.remove("active"));
   document.getElementById(screen).classList.add("active");
-  const title = document.getElementById("title");
   const navBtn = document.getElementById("navBtn");
+  const exportBtn = document.getElementById("exportBtn");
+  const deleteBtn = document.getElementById("deleteBtn");
+  exportBtn.style.display = "none";
+  deleteBtn.style.display = "none";
+
   if(screen === "run"){
-    title.innerText = "RunFlow";
     navBtn.innerText = "Routes";
     navBtn.onclick = () => nav("routes");
   } else if(screen === "routes"){
-    title.innerText = "Routes";
     navBtn.innerText = "Start";
     navBtn.onclick = () => nav("run");
     loadRuns();
   } else if(screen === "view"){
-    title.innerText = "Route";
     navBtn.innerText = "Terug";
     navBtn.onclick = () => nav("routes");
+    exportBtn.style.display = "block";
+    deleteBtn.style.display = "block";
   }
 }
 
@@ -106,7 +120,7 @@ function nav(screen){
 function startRun(){
   running = true;
   document.getElementById("btn").innerText = "STOP";
-  document.body.classList.remove("dim");
+  document.body.classList.add("dim"); // scherm gaat direct donker
   startTime = Date.now();
   tempRun = { start: startTime, points: [] };
   interval = setInterval(()=>{
@@ -135,30 +149,18 @@ function toggleRun(){
   }
 }
 
-/* Scherm donker/licht togglen tijdens het lopen (batterijbesparing) */
+/* Scherm donker/licht togglen tijdens het lopen */
 document.getElementById("run").addEventListener("click", (e)=>{
   if(!running) return;
   if(e.target.id === "btn") return;
-  document.body.classList.toggle("dim");
+  document.body.classList.add("dim");
+});
+
+document.getElementById("dimOverlay").addEventListener("click", ()=>{
+  document.body.classList.remove("dim");
 });
 
 /* ---------- Lijst met runs ---------- */
-function setupItem(div, onView, onDelete){
-  let timer, longFired = false, moved = false;
-  const cancelTimer = ()=> clearTimeout(timer);
-  div.addEventListener("pointerdown", ()=>{
-    longFired = false; moved = false;
-    timer = setTimeout(()=>{ longFired = true; onDelete(); }, 600);
-  });
-  div.addEventListener("pointermove", ()=>{ moved = true; cancelTimer(); });
-  div.addEventListener("pointerup", ()=>{
-    cancelTimer();
-    if(!longFired && !moved) onView();
-  });
-  div.addEventListener("pointercancel", cancelTimer);
-  div.oncontextmenu = (e)=> e.preventDefault();
-}
-
 function loadRuns(){
   let runs = JSON.parse(localStorage.getItem("runs")||"[]");
   const list = document.getElementById("list");
@@ -167,7 +169,7 @@ function loadRuns(){
     list.innerHTML = '<div style="opacity:0.5;text-align:center;">Nog geen runs</div>';
     return;
   }
-  runs.forEach((r,i)=>{
+  runs.forEach((r)=>{
     let totalDist = 0;
     for(let j=1; j<r.points.length; j++) totalDist += getDistance(r.points[j-1], r.points[j]);
     let durationMs = (r.end||Date.now()) - r.start;
@@ -177,16 +179,7 @@ function loadRuns(){
     let div = document.createElement("div");
     div.className = "item";
     div.innerHTML = `<span>${dateStr}</span><span>${(totalDist/1000).toFixed(2)} km · ${formatTime(durationMs)}</span>`;
-    setupItem(div,
-      ()=> showRun(r),
-      ()=>{
-        if(confirm("Verwijderen?")){
-          runs.splice(i,1);
-          localStorage.setItem("runs", JSON.stringify(runs));
-          loadRuns();
-        }
-      }
-    );
+    div.onclick = () => showRun(r);
     list.appendChild(div);
   });
 }
@@ -194,9 +187,12 @@ function loadRuns(){
 /* ---------- Route weergeven ---------- */
 function showRun(run){
   nav("view");
-  currentRunPoints = run.points;
+  currentRun = run;
   selected = [];
-  document.getElementById("info").innerHTML = "";
+  dotEls = [];
+  const info = document.getElementById("info");
+  info.innerHTML = "";
+  info.style.display = "none";
 
   let lons = run.points.map(p=>p.lon), lats = run.points.map(p=>p.lat);
   let minLon = Math.min(...lons), maxLon = Math.max(...lons);
@@ -217,10 +213,38 @@ function showRun(run){
     c.setAttribute("cy", mapYFn(p.lat));
     c.setAttribute("r", 1.8);
     c.setAttribute("class", "dot");
-    c.onclick = ()=> selectPoint(p, i, c);
     svg.appendChild(c);
+    dotEls.push(c);
   });
 }
+
+/* Klik overal op de kaart -> pakt automatisch het dichtstbijzijnde punt */
+function svgCoordsFromEvent(e){
+  const svg = document.getElementById("svg");
+  const rect = svg.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) / rect.width * 100,
+    y: (e.clientY - rect.top) / rect.height * 100
+  };
+}
+
+function nearestPointIndex(x, y){
+  let best = -1, bestDist = Infinity;
+  currentRun.points.forEach((p,i)=>{
+    const px = mapXFn(p.lon), py = mapYFn(p.lat);
+    const d = (px-x)**2 + (py-y)**2;
+    if(d < bestDist){ bestDist = d; best = i; }
+  });
+  return best;
+}
+
+document.getElementById("svg").addEventListener("click", (e)=>{
+  if(!currentRun) return;
+  const { x, y } = svgCoordsFromEvent(e);
+  const idx = nearestPointIndex(x, y);
+  if(idx < 0) return;
+  selectPoint(currentRun.points[idx], idx, dotEls[idx]);
+});
 
 function selectPoint(p, i, el){
   selected.push({ p, i, el });
@@ -240,6 +264,7 @@ function updateInfo(){
     const { p } = selected[0];
     activeLine.setAttribute("points", "");
     info.innerHTML = `Tijd: ${formatTime(p.t)}<br><a href="https://www.google.com/maps?q=${p.lat},${p.lon}" target="_blank">Bekijk op Maps</a>`;
+    info.style.display = "block";
     return;
   }
 
@@ -248,13 +273,62 @@ function updateInfo(){
     if(a.i > b.i) [a,b] = [b,a];
     const dist = getDistance(a.p, b.p);
     const dt = b.p.t - a.p.t;
-    const seg = currentRunPoints.slice(a.i, b.i+1);
+    const seg = currentRun.points.slice(a.i, b.i+1);
     activeLine.setAttribute("points", seg.map(p=>`${mapXFn(p.lon)},${mapYFn(p.lat)}`).join(" "));
-    info.innerHTML = `Tijd: ${formatTime(a.p.t)} → ${formatTime(b.p.t)}<br>Afstand: ${dist.toFixed(0)} m<br>Duur: ${formatTime(dt)}`;
+    info.innerHTML = `Tijd: ${formatTime(a.p.t)} → ${formatTime(b.p.t)}<br>Afstand: ${dist.toFixed(0)} m<br>Duur: ${formatTime(dt)}<br><a href="https://www.google.com/maps?q=${a.p.lat},${a.p.lon}" target="_blank">Punt 1 op Maps</a> · <a href="https://www.google.com/maps?q=${b.p.lat},${b.p.lon}" target="_blank">Punt 2 op Maps</a>`;
+    info.style.display = "block";
   }
 }
 
+/* ---------- Verwijderen & exporteren ---------- */
+document.getElementById("deleteBtn").onclick = ()=>{
+  if(!currentRun) return;
+  if(confirm("Deze route verwijderen?")){
+    let runs = JSON.parse(localStorage.getItem("runs")||"[]");
+    runs = runs.filter(r => r.start !== currentRun.start);
+    localStorage.setItem("runs", JSON.stringify(runs));
+    currentRun = null;
+    nav("routes");
+  }
+};
+
+document.getElementById("exportBtn").onclick = ()=>{
+  if(!currentRun) return;
+  const dataStr = JSON.stringify(currentRun, null, 2);
+  const blob = new Blob([dataStr], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const d = new Date(currentRun.start);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `runflow-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+/* ---------- Testroute Amersfoort ---------- */
+function seedTestRoute(){
+  let runs = JSON.parse(localStorage.getItem("runs")||"[]");
+  if(runs.length > 0) return;
+  const centerLat = 52.1561, centerLon = 5.3878; // centrum Amersfoort
+  const n = 40;
+  const points = [];
+  for(let i=0; i<=n; i++){
+    const angle = (i/n) * Math.PI * 2;
+    const r = 0.009; // ongeveer 1 km straal
+    const lat = centerLat + r*Math.sin(angle);
+    const lon = centerLon + (r*Math.cos(angle)) / Math.cos(centerLat*Math.PI/180);
+    points.push({ lat, lon, t: i * 30000 }); // elke 30s een punt
+  }
+  const startTs = Date.now() - (24*60*60*1000);
+  const testRun = { start: startTs, end: startTs + n*30000, points };
+  runs.unshift(testRun);
+  localStorage.setItem("runs", JSON.stringify(runs));
+}
+
 /* ---------- Init ---------- */
+seedTestRoute();
 nav("run");
 </script>
 </body>

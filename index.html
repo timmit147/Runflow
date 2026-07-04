@@ -4,34 +4,43 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
 <title>RunFlow</title>
+<link rel="manifest" href="manifest.json">
 <style>
 body { margin: 0; background: #0b1220; font-family: system-ui; color: white; overflow: hidden; }
-.header { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: flex-start; }
-.btn { padding: 10px 20px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); cursor: pointer; background: transparent; color: white; }
-.screen { display: none; height: 100vh; width: 100%; align-items: center; justify-content: center; flex-direction: column; }
+.header { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; font-size: 14px; font-weight: bold; z-index: 5; transition: opacity .3s; }
+#title { opacity: 0.8; }
+.btn { padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); cursor: pointer; }
+.screen { display: none; height: 100vh; width: 100%; align-items: center; justify-content: center; flex-direction: column; box-sizing: border-box; }
 .active { display: flex; }
-.bigbtn { width: 180px; height: 180px; border-radius: 50%; border: none; font-size: 20px; font-weight: bold; background: white; color: black; cursor: pointer; }
-.timer { margin-top: 15px; font-size: 28px; }
-.list { width: 80%; max-width: 400px; display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow-y: auto; margin-top: 60px; }
-.item { padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.05); cursor: pointer; }
-.wrap { width: 360px; height: 360px; margin-top: 20px; position: relative; }
+.bigbtn { width: 180px; height: 180px; border-radius: 50%; border: none; font-size: 20px; font-weight: bold; background: white; color: black; cursor: pointer; transition: opacity .3s; }
+.timer { margin-top: 15px; font-size: 28px; font-variant-numeric: tabular-nums; transition: opacity .3s; }
+.list { width: 80%; max-width: 400px; display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow-y: auto; }
+.item { padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.05); cursor: pointer; display: flex; justify-content: space-between; user-select: none; -webkit-user-select: none; touch-action: pan-y; }
+.wrap { width: 360px; height: 360px; }
 svg { width: 100%; height: 100%; }
-.line { fill: none; stroke: white; stroke-width: 2; opacity: 0.5; }
-.line-green { fill: none; stroke: #4ade80; stroke-width: 4; }
+.line { fill: none; stroke: white; stroke-width: 1.5; opacity: 0.4; }
+.line-active { fill: none; stroke: #4ade80; stroke-width: 3; }
 .dot { fill: white; cursor: pointer; }
-.dot-selected { fill: #4ade80; r: 5; }
-.info { position: absolute; bottom: 30px; width: 80%; text-align: left; font-size: 13px; background: rgba(0,0,0,0.8); padding: 15px; border-radius: 8px; border: 1px solid #444; z-index: 10; }
+.dot-selected { fill: #4ade80; }
+.info { position: absolute; bottom: 30px; width: 80%; max-width: 400px; text-align: left; font-size: 13px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; line-height: 1.6; min-height: 14px; }
+.info a { color: #4ade80; }
+
+/* Donker scherm tijdens het lopen (batterijbesparing) */
+body.dim .header,
+body.dim .timer,
+body.dim .bigbtn { opacity: 0; pointer-events: none; }
 </style>
 </head>
 <body>
 
 <div class="header">
-  <div id="navBtn" class="btn" onclick="nav('routes')">Routes</div>
+  <div id="title">RunFlow</div>
+  <div id="navBtn" class="btn">Routes</div>
 </div>
 
 <div id="run" class="screen active">
-  <button class="bigbtn" onclick="toggleRun()" id="btn">START</button>
-  <div class="timer" id="timer">00:00</div>
+  <button class="bigbtn" id="btn" onclick="event.stopPropagation(); toggleRun();">START</button>
+  <div class="timer" id="timer">00:00:00</div>
 </div>
 
 <div id="routes" class="screen">
@@ -39,128 +48,214 @@ svg { width: 100%; height: 100%; }
 </div>
 
 <div id="view" class="screen">
-  <div class="wrap"><svg id="svg" viewBox="0 0 100 100"></svg></div>
-  <div class="info" id="info">Klik op een punt</div>
+  <div class="wrap"><svg id="svg" viewBox="0 0 100 100">
+    <polyline id="baseLine" class="line" points=""></polyline>
+    <polyline id="activeLine" class="line-active" points=""></polyline>
+  </svg></div>
+  <div class="info" id="info"></div>
 </div>
 
 <script>
-let running=false, startTime, interval, tempRun, watchId, selectedPoints=[];
+let running = false, startTime, interval, tempRun, watchId;
+let selected = [];
+let currentRunPoints = [];
+let mapXFn, mapYFn;
 
-function nav(s){
-  document.querySelectorAll(".screen").forEach(x=>x.classList.remove("active"));
-  document.getElementById(s).classList.add("active");
-  document.getElementById("navBtn").innerText = (s==="run" ? "Routes" : "Start");
-  document.getElementById("navBtn").onclick = () => nav(s==="run" ? "routes" : "run");
+/* ---------- Helpers ---------- */
+function pad(n){ return n.toString().padStart(2,'0'); }
+
+function formatTime(ms){
+  let totalSec = Math.max(0, Math.floor(ms/1000));
+  let h = Math.floor(totalSec/3600);
+  let m = Math.floor((totalSec%3600)/60);
+  let s = totalSec%60;
+  return pad(h)+':'+pad(m)+':'+pad(s);
 }
 
 function getDistance(p1, p2) {
   const R = 6371e3;
+  const r1 = p1.lat * Math.PI/180, r2 = p2.lat * Math.PI/180;
   const dLat = (p2.lat-p1.lat)*Math.PI/180, dLon = (p2.lon-p1.lon)*Math.PI/180;
-  const a = Math.sin(dLat/2)**2 + Math.cos(p1.lat*Math.PI/180)*Math.cos(p2.lat*Math.PI/180)*Math.sin(dLon/2)**2;
+  const a = Math.sin(dLat/2)**2 + Math.cos(r1)*Math.cos(r2)*Math.sin(dLon/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+/* ---------- Navigatie ---------- */
+function nav(screen){
+  document.querySelectorAll(".screen").forEach(x=>x.classList.remove("active"));
+  document.getElementById(screen).classList.add("active");
+  const title = document.getElementById("title");
+  const navBtn = document.getElementById("navBtn");
+  if(screen === "run"){
+    title.innerText = "RunFlow";
+    navBtn.innerText = "Routes";
+    navBtn.onclick = () => nav("routes");
+  } else if(screen === "routes"){
+    title.innerText = "Routes";
+    navBtn.innerText = "Start";
+    navBtn.onclick = () => nav("run");
+    loadRuns();
+  } else if(screen === "view"){
+    title.innerText = "Route";
+    navBtn.innerText = "Terug";
+    navBtn.onclick = () => nav("routes");
+  }
+}
+
+/* ---------- Run tracken ---------- */
 function startRun(){
-  running=true;
-  document.getElementById("btn").innerText="STOP";
-  startTime=Date.now();
-  tempRun={start:startTime, points:[]};
-  interval=setInterval(()=>{
-    let s=Math.floor((Date.now()-startTime)/1000);
-    let m=Math.floor(s/60); s%=60;
-    document.getElementById("timer").innerText = String(m).padStart(2,'0') + ":" + String(s).padStart(2,'0');
-  },1000);
-  watchId=navigator.geolocation.watchPosition(p=>{
-    tempRun.points.push({lat:p.coords.latitude, lon:p.coords.longitude, t:Date.now()-startTime});
-  },null,{enableHighAccuracy:true});
+  running = true;
+  document.getElementById("btn").innerText = "STOP";
+  document.body.classList.remove("dim");
+  startTime = Date.now();
+  tempRun = { start: startTime, points: [] };
+  interval = setInterval(()=>{
+    document.getElementById("timer").innerText = formatTime(Date.now()-startTime);
+  }, 1000);
+  watchId = navigator.geolocation.watchPosition(p=>{
+    tempRun.points.push({ lat: p.coords.latitude, lon: p.coords.longitude, t: Date.now()-startTime });
+  }, null, { enableHighAccuracy: true });
 }
 
 function toggleRun(){
-  if(!running) startRun();
-  else {
-    running=false;
+  if(!running){
+    startRun();
+  } else {
+    running = false;
     clearInterval(interval);
     navigator.geolocation.clearWatch(watchId);
-    tempRun.end=Date.now();
-    let runs=JSON.parse(localStorage.getItem("runs")||"[]");
+    document.body.classList.remove("dim");
+    tempRun.end = Date.now();
+    let runs = JSON.parse(localStorage.getItem("runs")||"[]");
     runs.unshift(tempRun);
     localStorage.setItem("runs", JSON.stringify(runs));
-    document.getElementById("btn").innerText="START";
-    document.getElementById("timer").innerText="00:00";
+    document.getElementById("btn").innerText = "START";
+    document.getElementById("timer").innerText = "00:00:00";
     nav("routes");
   }
 }
 
+/* Scherm donker/licht togglen tijdens het lopen (batterijbesparing) */
+document.getElementById("run").addEventListener("click", (e)=>{
+  if(!running) return;
+  if(e.target.id === "btn") return;
+  document.body.classList.toggle("dim");
+});
+
+/* ---------- Lijst met runs ---------- */
+function setupItem(div, onView, onDelete){
+  let timer, longFired = false, moved = false;
+  const cancelTimer = ()=> clearTimeout(timer);
+  div.addEventListener("pointerdown", ()=>{
+    longFired = false; moved = false;
+    timer = setTimeout(()=>{ longFired = true; onDelete(); }, 600);
+  });
+  div.addEventListener("pointermove", ()=>{ moved = true; cancelTimer(); });
+  div.addEventListener("pointerup", ()=>{
+    cancelTimer();
+    if(!longFired && !moved) onView();
+  });
+  div.addEventListener("pointercancel", cancelTimer);
+  div.oncontextmenu = (e)=> e.preventDefault();
+}
+
 function loadRuns(){
-  let runs=JSON.parse(localStorage.getItem("runs")||"[]");
-  const list=document.getElementById("list");
-  list.innerHTML="";
+  let runs = JSON.parse(localStorage.getItem("runs")||"[]");
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+  if(runs.length === 0){
+    list.innerHTML = '<div style="opacity:0.5;text-align:center;">Nog geen runs</div>';
+    return;
+  }
   runs.forEach((r,i)=>{
-    let div=document.createElement("div");
-    div.className="item";
-    div.innerText=`Run ${runs.length-i}`;
-    div.onclick=()=>showRun(r);
-    div.oncontextmenu=(e)=>{
-      e.preventDefault();
-      if(confirm("Verwijderen?")){ runs.splice(i,1); localStorage.setItem("runs", JSON.stringify(runs)); loadRuns(); }
-    };
+    let totalDist = 0;
+    for(let j=1; j<r.points.length; j++) totalDist += getDistance(r.points[j-1], r.points[j]);
+    let durationMs = (r.end||Date.now()) - r.start;
+    let d = new Date(r.start);
+    let dateStr = pad(d.getDate())+'/'+pad(d.getMonth()+1)+' '+pad(d.getHours())+':'+pad(d.getMinutes());
+
+    let div = document.createElement("div");
+    div.className = "item";
+    div.innerHTML = `<span>${dateStr}</span><span>${(totalDist/1000).toFixed(2)} km · ${formatTime(durationMs)}</span>`;
+    setupItem(div,
+      ()=> showRun(r),
+      ()=>{
+        if(confirm("Verwijderen?")){
+          runs.splice(i,1);
+          localStorage.setItem("runs", JSON.stringify(runs));
+          loadRuns();
+        }
+      }
+    );
     list.appendChild(div);
   });
 }
 
+/* ---------- Route weergeven ---------- */
 function showRun(run){
   nav("view");
-  const svg=document.getElementById("svg");
-  svg.innerHTML="";
-  selectedPoints=[];
-  let lons=run.points.map(p=>p.lon), lats=run.points.map(p=>p.lat);
-  let minLon=Math.min(...lons), maxLon=Math.max(...lons), minLat=Math.min(...lats), maxLat=Math.max(...lats);
-  const mapX=l=>((l-minLon)/(maxLon-minLon||1))*80+10;
-  const mapY=l=>((maxLat-l)/(maxLat-minLat||1))*80+10;
+  currentRunPoints = run.points;
+  selected = [];
+  document.getElementById("info").innerHTML = "";
 
-  let path="M ";
+  let lons = run.points.map(p=>p.lon), lats = run.points.map(p=>p.lat);
+  let minLon = Math.min(...lons), maxLon = Math.max(...lons);
+  let minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  mapXFn = l => ((l-minLon)/(maxLon-minLon || 1))*80+10;
+  mapYFn = l => ((maxLat-l)/(maxLat-minLat || 1))*80+10;
+
+  const svg = document.getElementById("svg");
+  svg.querySelectorAll(".dot").forEach(d=>d.remove());
+
+  const baseLine = document.getElementById("baseLine");
+  baseLine.setAttribute("points", run.points.map(p=>`${mapXFn(p.lon)},${mapYFn(p.lat)}`).join(" "));
+  document.getElementById("activeLine").setAttribute("points", "");
+
   run.points.forEach((p,i)=>{
-    path += (i===0?"":"L ") + mapX(p.lon) + " " + mapY(p.lat) + " ";
-  });
-
-  let lineEl=document.createElementNS("http://www.w3.org/2000/svg","path");
-  lineEl.setAttribute("d",path); lineEl.setAttribute("class","line");
-  svg.appendChild(lineEl);
-
-  run.points.forEach((p,i)=>{
-    let c=document.createElementNS("http://www.w3.org/2000/svg","circle");
-    c.setAttribute("cx",mapX(p.lon)); c.setAttribute("cy",mapY(p.lat)); c.setAttribute("r",2); c.setAttribute("class","dot");
-    c.onclick=()=>{
-      if(selectedPoints.length>=2) { 
-          selectedPoints=[]; 
-          document.querySelectorAll('.dot-selected').forEach(d=>d.classList.remove('dot-selected'));
-          let greens = svg.querySelectorAll('.line-green');
-          greens.forEach(g => g.remove());
-      }
-      selectedPoints.push(p);
-      c.classList.add("dot-selected");
-      
-      let info=document.getElementById("info");
-      info.innerHTML=`Tijd: ${Math.floor(p.t/1000)}s<br><a href="https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}" target="_blank" style="color:#4ade80;">Bekijk op Maps</a>`;
-      
-      if(selectedPoints.length===2){
-        let d=getDistance(selectedPoints[0], selectedPoints[1]);
-        let dt=Math.abs(selectedPoints[1].t-selectedPoints[0].t)/1000;
-        info.innerHTML+=`<br>Afstand: ${d.toFixed(0)}m, Tijd: ${dt.toFixed(0)}s`;
-        
-        // Teken groene lijn
-        let gLine=document.createElementNS("http://www.w3.org/2000/svg","line");
-        gLine.setAttribute("x1", mapX(selectedPoints[0].lon)); gLine.setAttribute("y1", mapY(selectedPoints[0].lat));
-        gLine.setAttribute("x2", mapX(selectedPoints[1].lon)); gLine.setAttribute("y2", mapY(selectedPoints[1].lat));
-        gLine.setAttribute("class","line-green");
-        svg.appendChild(gLine);
-      }
-    };
+    let c = document.createElementNS("http://www.w3.org/2000/svg","circle");
+    c.setAttribute("cx", mapXFn(p.lon));
+    c.setAttribute("cy", mapYFn(p.lat));
+    c.setAttribute("r", 1.8);
+    c.setAttribute("class", "dot");
+    c.onclick = ()=> selectPoint(p, i, c);
     svg.appendChild(c);
   });
 }
 
-loadRuns();
+function selectPoint(p, i, el){
+  selected.push({ p, i, el });
+  if(selected.length > 2){
+    const removed = selected.shift();
+    removed.el.classList.remove("dot-selected");
+  }
+  el.classList.add("dot-selected");
+  updateInfo();
+}
+
+function updateInfo(){
+  const info = document.getElementById("info");
+  const activeLine = document.getElementById("activeLine");
+
+  if(selected.length === 1){
+    const { p } = selected[0];
+    activeLine.setAttribute("points", "");
+    info.innerHTML = `Tijd: ${formatTime(p.t)}<br><a href="https://www.google.com/maps?q=${p.lat},${p.lon}" target="_blank">Bekijk op Maps</a>`;
+    return;
+  }
+
+  if(selected.length === 2){
+    let [a,b] = selected;
+    if(a.i > b.i) [a,b] = [b,a];
+    const dist = getDistance(a.p, b.p);
+    const dt = b.p.t - a.p.t;
+    const seg = currentRunPoints.slice(a.i, b.i+1);
+    activeLine.setAttribute("points", seg.map(p=>`${mapXFn(p.lon)},${mapYFn(p.lat)}`).join(" "));
+    info.innerHTML = `Tijd: ${formatTime(a.p.t)} → ${formatTime(b.p.t)}<br>Afstand: ${dist.toFixed(0)} m<br>Duur: ${formatTime(dt)}`;
+  }
+}
+
+/* ---------- Init ---------- */
+nav("run");
 </script>
 </body>
 </html>

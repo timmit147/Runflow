@@ -2,7 +2,7 @@
 <html lang="nl">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
 <title>RunFlow</title>
 
 <link rel="manifest" href="manifest.json">
@@ -32,6 +32,20 @@ body {
   border-radius: 8px;
   border: 1px solid rgba(255,255,255,0.2);
   cursor: pointer;
+  background: transparent;
+  color: white;
+}
+
+.install-btn {
+  background: #4ade80;
+  color: #0b1220;
+  border: none;
+  font-weight: bold;
+  padding: 10px 20px;
+  border-radius: 8px;
+  margin-bottom: 15px;
+  cursor: pointer;
+  display: none; /* Standaard onzichtbaar */
 }
 
 /* SCREENS */
@@ -54,6 +68,7 @@ body {
   font-weight: bold;
   background: white;
   color: black;
+  cursor: pointer;
 }
 
 .timer {
@@ -67,6 +82,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  max-height: 70vh;
+  overflow-y: auto;
 }
 
 .item {
@@ -88,20 +105,31 @@ svg { width: 100%; height: 100%; }
 .line {
   fill: none;
   stroke: white;
-  stroke-width: 1;
+  stroke-width: 2;
+  opacity: 0.6;
 }
 
 .dot {
   fill: white;
+  cursor: pointer;
+  transition: r 0.2s, fill 0.2s;
+}
+
+.dot:hover {
+  fill: #4ade80;
+  r: 4;
 }
 
 .info {
   position: absolute;
   bottom: 30px;
-  width: 100%;
+  width: 90%;
   text-align: center;
-  font-size: 12px;
-  opacity: 0.6;
+  font-size: 14px;
+  background: rgba(0,0,0,0.5);
+  padding: 10px;
+  border-radius: 8px;
+  min-height: 20px;
 }
 
 .popup {
@@ -117,6 +145,17 @@ svg { width: 100%; height: 100%; }
   background: #111a2e;
   padding: 20px;
   border-radius: 12px;
+  text-align: center;
+}
+
+.box button {
+  margin: 15px 5px 0 5px;
+  padding: 8px 20px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  background: white;
+  color: black;
 }
 </style>
 </head>
@@ -128,26 +167,23 @@ svg { width: 100%; height: 100%; }
   <div id="title">RunFlow</div>
 </div>
 
-<!-- RUN -->
 <div id="run" class="screen active">
   <button class="bigbtn" onclick="toggleRun()" id="btn">START</button>
   <div class="timer" id="timer">00:00</div>
 </div>
 
-<!-- ROUTES -->
 <div id="routes" class="screen">
+  <button id="installBtn" class="install-btn" onclick="installPWA()">App Installeren</button>
   <div class="list" id="list"></div>
 </div>
 
-<!-- VIEW -->
 <div id="view" class="screen">
   <div class="wrap">
     <svg id="svg" viewBox="0 0 100 100"></svg>
   </div>
-  <div class="info" id="info"></div>
+  <div class="info" id="info">Klik op een stip voor info</div>
 </div>
 
-<!-- POPUP -->
 <div id="popup" class="popup">
   <div class="box">
     <div>Stop run?</div>
@@ -157,163 +193,242 @@ svg { width: 100%; height: 100%; }
 </div>
 
 <script>
-let state="run";
-let running=false;
+let state = "run";
+let running = false;
 let startTime;
 let interval;
 let tempRun;
+let watchId;
+let deferredPrompt; // Variabele voor de PWA installatie
 
-/* NAV */
+/* PWA INSTALLATIE LOGICA */
+window.addEventListener('beforeinstallprompt', (e) => {
+  // Voorkom dat de browser direct zijn eigen installatie-balk toont
+  e.preventDefault();
+  // Bewaar het event zodat we het later kunnen activeren
+  deferredPrompt = e;
+  // Toon onze eigen installatieknop in het routes-scherm
+  document.getElementById('installBtn').style.display = 'block';
+});
+
+function installPWA() {
+  if (deferredPrompt) {
+    deferredPrompt.prompt(); // Toon de installatie pop-up van de telefoon
+    deferredPrompt.userChoice.then((choiceResult) => {
+      if (choiceResult.outcome === 'accepted') {
+        console.log('Gebruiker heeft de app geïnstalleerd');
+      }
+      deferredPrompt = null;
+      document.getElementById('installBtn').style.display = 'none'; // Verberg knop na installatie
+    });
+  }
+}
+
+/* NAVIGATIE & HEADER */
 function nav(s){
-  state=s;
-  document.querySelectorAll(".screen").forEach(x=>x.classList.remove("active"));
+  state = s;
+  document.querySelectorAll(".screen").forEach(x => x.classList.remove("active"));
   document.getElementById(s).classList.add("active");
   updateHeader();
+  
+  if(s !== "view") {
+    document.getElementById("info").innerText = "Klik op een stip voor info";
+  }
 }
 
-/* HEADER */
 function updateHeader(){
-  const left=document.getElementById("leftBtn");
-  const title=document.getElementById("title");
+  const left = document.getElementById("leftBtn");
+  const title = document.getElementById("title");
 
-  if(state==="run"){
-    left.innerText="Routes";
-    left.onclick=()=>nav("routes");
-    title.innerText="RunFlow";
+  if(state === "run"){
+    left.innerText = "Routes";
+    left.onclick = () => nav("routes");
+    title.innerText = "RunFlow";
   }
 
-  if(state==="routes"){
-    left.innerText="← Start";
-    left.onclick=()=>nav("run");
-    title.innerText="Routes";
+  if(state === "routes"){
+    left.innerText = "← Start";
+    left.onclick = () => nav("run");
+    title.innerText = "Routes";
+    loadRuns();
   }
 
-  if(state==="view"){
-    left.innerText="← Back";
-    left.onclick=()=>nav("routes");
-    title.innerText="";
+  if(state === "view"){
+    left.innerText = "← Terug";
+    left.onclick = () => nav("routes");
+    title.innerText = "Route details";
   }
 }
 
-/* RUN */
+/* AFSTANDSBEREKENING (Haversine) */
+function getDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371e3;
+  const rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad;
+  const dLon = (lon2 - lon1) * rad;
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(lat1 * rad) * Math.cos(lat2 * rad) *
+            Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c; 
+}
+
+/* RUN LOGICA */
 function toggleRun(){
   if(!running) startRun();
   else document.getElementById("popup").style.display="flex";
 }
 
 function startRun(){
-  running=true;
-  document.getElementById("btn").innerText="STOP";
+  running = true;
+  document.getElementById("btn").innerText = "STOP";
+  startTime = Date.now();
+  tempRun = { start: startTime, points: [] };
 
-  startTime=Date.now();
+  interval = setInterval(() => {
+    let s = Math.floor((Date.now() - startTime) / 1000);
+    let m = Math.floor(s / 60);
+    s %= 60;
+    document.getElementById("timer").innerText = String(m).padStart(2,'0') + ":" + String(s).padStart(2,'0');
+  }, 1000);
 
-  interval=setInterval(()=>{
-    let s=Math.floor((Date.now()-startTime)/1000);
-    let m=Math.floor(s/60);
-    s%=60;
+  if ("geolocation" in navigator) {
+    watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        let lat = position.coords.latitude;
+        let lon = position.coords.longitude;
+        let t = Date.now() - startTime;
+        let len = tempRun.points.length;
 
-    document.getElementById("timer").innerText=
-      String(m).padStart(2,'0')+":"+String(s).padStart(2,'0');
-  },1000);
-
-  tempRun={start:Date.now(),points:[]};
-
-  window.tracker=setInterval(()=>{
-    tempRun.points.push({
-      x:Math.random()*100,
-      y:Math.random()*100,
-      t:Date.now()-startTime
-    });
-  },1000);
+        if (len === 0) {
+          tempRun.points.push({ lat, lon, t });
+        } else {
+          let lastP = tempRun.points[len - 1];
+          let distance = getDistance(lastP.lat, lastP.lon, lat, lon);
+          
+          if (distance > 5) {
+            tempRun.points.push({ lat, lon, t });
+          }
+        }
+      },
+      (error) => {
+        console.warn('GPS Error: ', error.message);
+      },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+    );
+  }
 }
 
 function confirmStop(ok){
-  document.getElementById("popup").style.display="none";
+  document.getElementById("popup").style.display = "none";
   if(!ok) return;
   stopRun();
 }
 
 function stopRun(){
-  running=false;
-  document.getElementById("btn").innerText="START";
+  running = false;
+  document.getElementById("btn").innerText = "START";
 
   clearInterval(interval);
-  clearInterval(window.tracker);
+  if (watchId) navigator.geolocation.clearWatch(watchId);
 
-  let runs=JSON.parse(localStorage.getItem("runs")||"[]");
+  let runs = JSON.parse(localStorage.getItem("runs") || "[]");
+  tempRun.end = Date.now();
+  
+  if(tempRun.points.length > 0) {
+      runs.unshift(tempRun);
+      localStorage.setItem("runs", JSON.stringify(runs));
+  }
 
-  tempRun.end=Date.now();
-  runs.unshift(tempRun);
-
-  localStorage.setItem("runs",JSON.stringify(runs));
-
-  document.getElementById("timer").innerText="00:00";
-
-  showRun(tempRun);
+  document.getElementById("timer").innerText = "00:00";
+  
+  if(tempRun.points.length > 0) showRun(tempRun);
+  else nav("routes");
 }
 
-/* LIST */
+/* LIJST MET ROUTES */
 function loadRuns(){
-  let runs=JSON.parse(localStorage.getItem("runs")||"[]");
-  const list=document.getElementById("list");
-  list.innerHTML="";
+  let runs = JSON.parse(localStorage.getItem("runs") || "[]");
+  const list = document.getElementById("list");
+  list.innerHTML = "";
 
-  runs.forEach((r,i)=>{
-    let div=document.createElement("div");
-    div.className="item";
-    let t=((r.end-r.start)/1000).toFixed(0);
-    div.innerHTML=`Run ${i+1} <span>${t}s</span>`;
-    div.onclick=()=>showRun(r);
+  if(runs.length === 0) {
+      list.innerHTML = "<div style='text-align:center; opacity:0.5;'>Nog geen routes.</div>";
+  }
+
+  runs.forEach((r, i) => {
+    let div = document.createElement("div");
+    div.className = "item";
+    let t = ((r.end - r.start) / 1000).toFixed(0);
+    let dist = 0;
+    for(let j=1; j<r.points.length; j++){
+       dist += getDistance(r.points[j-1].lat, r.points[j-1].lon, r.points[j].lat, r.points[j].lon);
+    }
+    div.innerHTML = `Run ${runs.length - i} <span>${dist.toFixed(0)}m / ${t}s</span>`;
+    div.onclick = () => showRun(r);
     list.appendChild(div);
   });
 }
 
-/* VIEW */
+/* KAART WEERGAVE */
 function showRun(run){
   nav("view");
+  const svg = document.getElementById("svg");
+  const info = document.getElementById("info");
+  svg.innerHTML = "";
+  info.innerText = "Klik op een stip voor info";
 
-  const svg=document.getElementById("svg");
-  svg.innerHTML="";
+  let pts = run.points;
+  if(!pts || pts.length === 0) return;
 
-  let pts=run.points;
-  if(!pts.length) return;
+  let lons = pts.map(p => p.lon);
+  let lats = pts.map(p => p.lat);
 
-  let xs=pts.map(p=>p.x);
-  let ys=pts.map(p=>p.y);
+  let minLon = Math.min(...lons), maxLon = Math.max(...lons);
+  let minLat = Math.min(...lats), maxLat = Math.max(...lats);
 
-  let minX=Math.min(...xs), maxX=Math.max(...xs);
-  let minY=Math.min(...ys), maxY=Math.max(...ys);
+  const pad = 10;
+  const mapX = lon => ((lon - minLon) / (maxLon - minLon || 1)) * (100 - pad * 2) + pad;
+  const mapY = lat => ((maxLat - lat) / (maxLat - minLat || 1)) * (100 - pad * 2) + pad;
 
-  const pad=10;
-
-  const mapX=x=>((x-minX)/(maxX-minX||1))*(100-pad*2)+pad;
-  const mapY=y=>((y-minY)/(maxY-minY||1))*(100-pad*2)+pad;
-
-  let path="";
-
-  pts.forEach((p,i)=>{
-    path+=(i===0?"M":"L")+mapX(p.x)+" "+mapY(p.y)+" ";
+  let path = "";
+  pts.forEach((p, i) => {
+    path += (i === 0 ? "M" : "L") + mapX(p.lon) + " " + mapY(p.lat) + " ";
   });
 
-  let line=document.createElementNS("http://www.w3.org/2000/svg","path");
-  line.setAttribute("d",path);
-  line.setAttribute("class","line");
+  let line = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  line.setAttribute("d", path);
+  line.setAttribute("class", "line");
   svg.appendChild(line);
 
-  pts.forEach(p=>{
-    let c=document.createElementNS("http://www.w3.org/2000/svg","circle");
-    c.setAttribute("cx",mapX(p.x));
-    c.setAttribute("cy",mapY(p.y));
-    c.setAttribute("r",2);
-    c.setAttribute("class","dot");
+  pts.forEach(p => {
+    let c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    c.setAttribute("cx", mapX(p.lon));
+    c.setAttribute("cy", mapY(p.lat));
+    c.setAttribute("r", 2);
+    c.setAttribute("class", "dot");
+    
+    c.onclick = () => {
+        let sec = (p.t / 1000).toFixed(1);
+        info.innerHTML = `Tijd: <b>${sec}s</b><br>Lat: ${p.lat.toFixed(5)}, Lon: ${p.lon.toFixed(5)}`;
+    };
+    
     svg.appendChild(c);
   });
 
-  let t=((run.end-run.start)/1000).toFixed(0);
-  document.getElementById("title").innerText=`${t}s`;
+  let t = ((run.end - run.start) / 1000).toFixed(0);
+  document.getElementById("title").innerText = `${t}s geselecteerd`;
 }
 
-/* INIT */
+/* INIT & SERVICE WORKER REGISTRATIE */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js')
+      .then(reg => console.log('Service Worker geregistreerd!'))
+      .catch(err => console.error('Service Worker registratie mislukt: ', err));
+  });
+}
+
 updateHeader();
 loadRuns();
 </script>

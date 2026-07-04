@@ -45,7 +45,7 @@ body {
   border-radius: 8px;
   margin-bottom: 15px;
   cursor: pointer;
-  display: none; /* Standaard onzichtbaar */
+  display: none;
 }
 
 /* SCREENS */
@@ -157,6 +157,14 @@ svg { width: 100%; height: 100%; }
   background: white;
   color: black;
 }
+
+/* WAKE LOCK STATUS INDICATOR */
+#wakeLockStatus {
+  position: absolute;
+  bottom: 10px;
+  font-size: 10px;
+  opacity: 0.5;
+}
 </style>
 </head>
 
@@ -170,6 +178,7 @@ svg { width: 100%; height: 100%; }
 <div id="run" class="screen active">
   <button class="bigbtn" onclick="toggleRun()" id="btn">START</button>
   <div class="timer" id="timer">00:00</div>
+  <div id="wakeLockStatus"></div>
 </div>
 
 <div id="routes" class="screen">
@@ -199,27 +208,55 @@ let startTime;
 let interval;
 let tempRun;
 let watchId;
-let deferredPrompt; // Variabele voor de PWA installatie
+let deferredPrompt; 
+let wakeLock = null; // Variabele voor de schermbeveiliging
+
+/* WAKE LOCK LOGICA (SCHERM AAN HOUDEN) */
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      document.getElementById('wakeLockStatus').innerText = "Scherm wordt actief gehouden";
+      
+      // Als de lock onverwacht stopt (bijv. door batterijbesparing)
+      wakeLock.addEventListener('release', () => {
+        document.getElementById('wakeLockStatus').innerText = "";
+      });
+    }
+  } catch (err) {
+    console.error(`Wake Lock fout: ${err.name}, ${err.message}`);
+  }
+}
+
+function releaseWakeLock() {
+  if (wakeLock !== null) {
+    wakeLock.release().then(() => {
+      wakeLock = null;
+      document.getElementById('wakeLockStatus').innerText = "";
+    });
+  }
+}
+
+// Zorg dat het scherm weer aan blijft als je terugwisselt vanuit een andere app
+document.addEventListener('visibilitychange', async () => {
+  if (wakeLock !== null && document.visibilityState === 'visible' && running) {
+    await requestWakeLock();
+  }
+});
 
 /* PWA INSTALLATIE LOGICA */
 window.addEventListener('beforeinstallprompt', (e) => {
-  // Voorkom dat de browser direct zijn eigen installatie-balk toont
   e.preventDefault();
-  // Bewaar het event zodat we het later kunnen activeren
   deferredPrompt = e;
-  // Toon onze eigen installatieknop in het routes-scherm
   document.getElementById('installBtn').style.display = 'block';
 });
 
 function installPWA() {
   if (deferredPrompt) {
-    deferredPrompt.prompt(); // Toon de installatie pop-up van de telefoon
+    deferredPrompt.prompt();
     deferredPrompt.userChoice.then((choiceResult) => {
-      if (choiceResult.outcome === 'accepted') {
-        console.log('Gebruiker heeft de app geïnstalleerd');
-      }
       deferredPrompt = null;
-      document.getElementById('installBtn').style.display = 'none'; // Verberg knop na installatie
+      document.getElementById('installBtn').style.display = 'none';
     });
   }
 }
@@ -285,6 +322,9 @@ function startRun(){
   startTime = Date.now();
   tempRun = { start: startTime, points: [] };
 
+  // Zet scherm lock aan
+  requestWakeLock();
+
   interval = setInterval(() => {
     let s = Math.floor((Date.now() - startTime) / 1000);
     let m = Math.floor(s / 60);
@@ -306,7 +346,7 @@ function startRun(){
           let lastP = tempRun.points[len - 1];
           let distance = getDistance(lastP.lat, lastP.lon, lat, lon);
           
-          if (distance > 5) {
+          if (distance > 5) { // Alleen opslaan als we meer dan 5 meter zijn verplaatst
             tempRun.points.push({ lat, lon, t });
           }
         }
@@ -316,6 +356,8 @@ function startRun(){
       },
       { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
     );
+  } else {
+    alert("GPS wordt niet ondersteund door je browser.");
   }
 }
 
@@ -331,6 +373,9 @@ function stopRun(){
 
   clearInterval(interval);
   if (watchId) navigator.geolocation.clearWatch(watchId);
+  
+  // Zet scherm lock uit
+  releaseWakeLock();
 
   let runs = JSON.parse(localStorage.getItem("runs") || "[]");
   tempRun.end = Date.now();
@@ -424,8 +469,7 @@ function showRun(run){
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js')
-      .then(reg => console.log('Service Worker geregistreerd!'))
-      .catch(err => console.error('Service Worker registratie mislukt: ', err));
+      .catch(err => console.error('Service Worker mislukt: ', err));
   });
 }
 

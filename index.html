@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="nl">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
@@ -18,33 +18,40 @@ body { margin: 0; background: #0b1220; font-family: system-ui; color: white; ove
 .timer { margin-top: 15px; font-size: 28px; font-variant-numeric: tabular-nums; }
 .list { width: 80%; max-width: 400px; display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow-y: auto; }
 .item { padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.05); cursor: pointer; display: flex; justify-content: space-between; user-select: none; -webkit-user-select: none; }
-#routeMap { width: 100%; height: 100%; display: none; }
-#routeSummary { text-align: center; }
+#routeMap { width: 100%; height: 100%; }
 .info { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); width: 80%; max-width: 400px; text-align: left; font-size: 13px; background: rgba(0,0,0,0.75); padding: 15px; border-radius: 8px; line-height: 1.6; display: none; z-index: 500; }
 
-/* Handmatig donker scherm: een zwarte overlay boven alles */
-#dimOverlay {
-  position: fixed;
-  inset: 0;
-  background: #000;
-  z-index: 999;
-  display: none;
+/* Lock screen: black, minimalistic, low power, hard to unlock by accident */
+.lock-overlay {
+  position: fixed; inset: 0; background: #000; z-index: 999;
+  display: none; flex-direction: column; align-items: center; justify-content: center; color: #fff;
 }
-body.dim #dimOverlay { display: block; }
+.lock-overlay.active { display: flex; }
+.lock-time { font-size: 52px; font-weight: 300; font-variant-numeric: tabular-nums; }
+.lock-sub { font-size: 14px; opacity: 0.5; margin-top: 8px; }
+.slide-track {
+  position: absolute; bottom: 70px; width: 80%; max-width: 320px; height: 56px;
+  background: rgba(255,255,255,0.08); border-radius: 28px; box-sizing: border-box;
+}
+.slide-handle {
+  position: absolute; left: 4px; top: 4px; width: 48px; height: 48px; border-radius: 50%;
+  background: #fff; touch-action: none;
+}
+.slide-label {
+  position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%);
+  text-align: center; font-size: 13px; opacity: 0.5; pointer-events: none;
+}
 </style>
 </head>
 <body>
 
-<div id="dimOverlay"></div>
-
 <div class="header">
   <div id="navBtn" class="btn">Routes</div>
   <div class="actions">
-    <div id="dimBtn" class="btn" style="display:none;">Slaap</div>
+    <div id="lockBtn" class="btn" style="display:none;">Lock</div>
     <div id="importBtn" class="btn" style="display:none;">Import</div>
-    <div id="kaartBtn" class="btn" style="display:none;">Kaart</div>
     <div id="exportBtn" class="btn" style="display:none;">Export</div>
-    <div id="deleteBtn" class="btn" style="display:none;">Verwijderen</div>
+    <div id="deleteBtn" class="btn" style="display:none;">Delete</div>
   </div>
 </div>
 
@@ -60,33 +67,41 @@ body.dim #dimOverlay { display: block; }
 </div>
 
 <div id="view" class="screen">
-  <div id="routeSummary"><div id="summaryText"></div></div>
   <div id="routeMap"></div>
   <div class="info" id="info"></div>
+</div>
+
+<div id="lockOverlay" class="lock-overlay">
+  <div class="lock-time" id="lockTime">00:00:00</div>
+  <div class="lock-sub" id="lockDist"></div>
+  <div class="slide-track" id="slideTrack">
+    <div class="slide-label">Slide to unlock</div>
+    <div class="slide-handle" id="slideHandle"></div>
+  </div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 let running = false, startTime, interval, tempRun, watchId;
 
-/* ---------- GPS-verwerkingspipeline (real-time) ---------- */
-const ACCURACY_MAX = 25;      // meter, verwerp minder nauwkeurige fixes
-const SPEED_MAX = 6;          // m/s, verwerp onrealistische sprongen
-const JITTER_MIN = 3;         // meter, negeer ruis dichter dan dit
-const EMA_ALPHA = 0.3;        // gladstrijken van de route
-const STOP_SPEED = 0.5;       // m/s, onder dit = "stilstaan"
-const STOP_DURATION = 10000;  // ms, hoe lang stilstaan moet duren om als pauze te gelden
+/* ---------- Real-time GPS processing pipeline ---------- */
+const ACCURACY_MAX = 25;      // meters, reject less accurate fixes
+const SPEED_MAX = 6;          // m/s, reject unrealistic jumps
+const JITTER_MIN = 3;         // meters, ignore noise closer than this
+const EMA_ALPHA = 0.3;        // smooths the route
+const STOP_SPEED = 0.5;       // m/s, below this counts as "standing still"
+const STOP_DURATION = 10000;  // ms, how long standing still must last to count as a pause
 
-let lastRaw = null;         // laatste ruwe fix (voor snelheidsberekening), ongeacht of geaccepteerd
-let lastRoutePoint = null;  // laatste punt dat echt aan de route is toegevoegd
-let lowSpeedSince = null;   // tijdstip vanaf wanneer de snelheid laag is
-let isPaused = false;       // zit de gebruiker in een pauze/stilstand
+let lastRaw = null;         // last raw fix (for speed calc), whether accepted or not
+let lastRoutePoint = null;  // last point actually added to the route
+let lowSpeedSince = null;   // timestamp from when speed has been low
+let isPaused = false;       // is the user currently paused / standing still
 
 function processRawSample(raw){
-  // 1. te onnauwkeurige fix negeren
+  // 1. reject fixes that are too inaccurate
   if(raw.accuracy != null && raw.accuracy > ACCURACY_MAX) return;
 
-  // snelheid bepalen (uit device, of berekend uit afstand/tijd t.o.v. vorige ruwe fix)
+  // determine speed (from device, or computed from distance/time vs previous raw fix)
   let instSpeed = 0;
   if(lastRaw){
     const dt = (raw.timestamp - lastRaw.timestamp) / 1000;
@@ -97,13 +112,13 @@ function processRawSample(raw){
     instSpeed = Math.max(instSpeed, raw.speed);
   }
 
-  // 2. onrealistische sprong (GPS-spike) negeren
+  // 2. reject unrealistic jumps (GPS spikes)
   if(lastRaw && instSpeed > SPEED_MAX){
     lastRaw = raw;
     return;
   }
 
-  // 3. stop-detectie: aanhoudend lage snelheid = pauze, route niet laten afwijken
+  // 3. stop detection: sustained low speed = pause, don't let the route drift
   if(instSpeed < STOP_SPEED){
     if(lowSpeedSince === null) lowSpeedSince = raw.timestamp;
     if(raw.timestamp - lowSpeedSince >= STOP_DURATION){
@@ -116,12 +131,12 @@ function processRawSample(raw){
 
   lastRaw = raw;
 
-  if(isPaused) return; // tijdens pauze geen nieuwe punten toevoegen: route blijft stabiel staan
+  if(isPaused) return; // no new points while paused: the route stays put
 
-  // 4. jitter verwijderen: te dichtbij het laatste routepunt = negeren
+  // 4. remove jitter: too close to the last route point = ignore
   if(lastRoutePoint && getDistance(lastRoutePoint, raw) < JITTER_MIN) return;
 
-  // 5. smoothing met exponential moving average
+  // 5. smoothing with an exponential moving average
   let lat, lon;
   if(!lastRoutePoint){
     lat = raw.lat; lon = raw.lon;
@@ -135,7 +150,7 @@ function processRawSample(raw){
   lastRoutePoint = newPoint;
 }
 
-/* ---------- Overig ---------- */
+/* ---------- State ---------- */
 let selected = [];
 let highlightedRange = [];
 let currentRun = null;
@@ -144,7 +159,6 @@ let routeMap = null;
 let routeLayerGroup = null;
 let activeLineLayer = null;
 let dotMarkers = [];
-let mapVisible = false;
 
 /* ---------- Helpers ---------- */
 function pad(n){ return n.toString().padStart(2,'0'); }
@@ -171,7 +185,7 @@ function centroid(points){
   return { lat: latSum/points.length, lon: lonSum/points.length };
 }
 
-/* Extra vangnet voor oude/geimporteerde routes die niet door de nieuwe pipeline zijn gelopen */
+/* Extra safety net for old/imported routes that didn't go through the new pipeline */
 function mergeClosePoints(points, thresholdMeters){
   if(!points.length) return points;
   const merged = [];
@@ -191,41 +205,45 @@ function mergeClosePoints(points, thresholdMeters){
   return merged;
 }
 
-/* ---------- Navigatie ---------- */
+function liveDistanceMeters(){
+  if(!tempRun) return 0;
+  let d = 0;
+  for(let j=1; j<tempRun.points.length; j++) d += getDistance(tempRun.points[j-1], tempRun.points[j]);
+  return d;
+}
+
+/* ---------- Navigation ---------- */
 function nav(screen){
   document.querySelectorAll(".screen").forEach(x=>x.classList.remove("active"));
   document.getElementById(screen).classList.add("active");
   const navBtn = document.getElementById("navBtn");
-  const dimBtn = document.getElementById("dimBtn");
+  const lockBtn = document.getElementById("lockBtn");
   const importBtn = document.getElementById("importBtn");
-  const kaartBtn = document.getElementById("kaartBtn");
   const exportBtn = document.getElementById("exportBtn");
   const deleteBtn = document.getElementById("deleteBtn");
-  dimBtn.style.display = "none";
+  lockBtn.style.display = "none";
   importBtn.style.display = "none";
-  kaartBtn.style.display = "none";
   exportBtn.style.display = "none";
   deleteBtn.style.display = "none";
 
   if(screen === "run"){
     navBtn.innerText = "Routes";
     navBtn.onclick = () => nav("routes");
-    dimBtn.style.display = "block";
+    lockBtn.style.display = "block";
   } else if(screen === "routes"){
     navBtn.innerText = "Start";
     navBtn.onclick = () => nav("run");
     importBtn.style.display = "block";
     loadRuns();
   } else if(screen === "view"){
-    navBtn.innerText = "Terug";
+    navBtn.innerText = "Back";
     navBtn.onclick = () => nav("routes");
-    kaartBtn.style.display = "block";
     exportBtn.style.display = "block";
     deleteBtn.style.display = "block";
   }
 }
 
-/* ---------- Run tracken ---------- */
+/* ---------- Recording a run ---------- */
 function startRun(){
   running = true;
   document.getElementById("btn").innerText = "STOP";
@@ -237,7 +255,18 @@ function startRun(){
   isPaused = false;
 
   interval = setInterval(()=>{
-    document.getElementById("timer").innerText = formatTime(Date.now()-startTime);
+    const elapsed = Date.now()-startTime;
+    document.getElementById("timer").innerText = formatTime(elapsed);
+
+    const liveCard = document.getElementById("liveCard");
+    if(liveCard){
+      liveCard.querySelector(".liveDist").innerText = (liveDistanceMeters()/1000).toFixed(2) + " km";
+      liveCard.querySelector(".liveTime").innerText = formatTime(elapsed);
+    }
+    if(document.getElementById("lockOverlay").classList.contains("active")){
+      document.getElementById("lockTime").innerText = formatTime(elapsed);
+      document.getElementById("lockDist").innerText = (liveDistanceMeters()/1000).toFixed(2) + " km";
+    }
   }, 1000);
 
   watchId = navigator.geolocation.watchPosition(p=>{
@@ -268,23 +297,95 @@ function toggleRun(){
   }
 }
 
-/* Handmatig scherm donker maken; klik op het zwart schakelt weer uit */
-document.getElementById("dimBtn").onclick = ()=>{
-  document.body.classList.add("dim");
-};
-document.getElementById("dimOverlay").addEventListener("click", ()=>{
-  document.body.classList.remove("dim");
+/* ---------- Lock screen (fullscreen, slide to unlock) ---------- */
+function showLock(){
+  document.getElementById("lockOverlay").classList.add("active");
+  document.getElementById("slideHandle").style.left = "4px";
+  if(document.documentElement.requestFullscreen){
+    document.documentElement.requestFullscreen().catch(()=>{});
+  }
+  if(running){
+    document.getElementById("lockTime").innerText = formatTime(Date.now()-startTime);
+    document.getElementById("lockDist").innerText = (liveDistanceMeters()/1000).toFixed(2) + " km";
+  } else {
+    document.getElementById("lockTime").innerText = "00:00:00";
+    document.getElementById("lockDist").innerText = "";
+  }
+}
+
+function hideLock(){
+  document.getElementById("lockOverlay").classList.remove("active");
+  if(document.exitFullscreen && document.fullscreenElement){
+    document.exitFullscreen().catch(()=>{});
+  }
+}
+
+document.getElementById("lockBtn").onclick = showLock;
+
+document.addEventListener("fullscreenchange", ()=>{
+  if(!document.fullscreenElement){
+    document.getElementById("lockOverlay").classList.remove("active");
+  }
 });
 
-/* ---------- Lijst met runs ---------- */
+/* Slide-to-unlock: requires a deliberate drag, so it can't be triggered by accident */
+(function(){
+  const handle = document.getElementById("slideHandle");
+  const track = document.getElementById("slideTrack");
+  let dragging = false, startX = 0, handleStartLeft = 0;
+
+  function clientX(e){ return e.touches ? e.touches[0].clientX : e.clientX; }
+
+  function onDown(e){
+    dragging = true;
+    startX = clientX(e);
+    handleStartLeft = handle.offsetLeft;
+  }
+  function onMove(e){
+    if(!dragging) return;
+    const maxLeft = track.clientWidth - handle.offsetWidth - 8;
+    let newLeft = handleStartLeft + (clientX(e) - startX);
+    newLeft = Math.max(4, Math.min(maxLeft, newLeft));
+    handle.style.left = newLeft + "px";
+  }
+  function onUp(){
+    if(!dragging) return;
+    dragging = false;
+    const maxLeft = track.clientWidth - handle.offsetWidth - 8;
+    if(handle.offsetLeft >= maxLeft * 0.85){
+      hideLock();
+    } else {
+      handle.style.left = "4px";
+    }
+  }
+
+  handle.addEventListener("pointerdown", onDown);
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+})();
+
+/* ---------- Runs list ---------- */
 function loadRuns(){
   let runs = JSON.parse(localStorage.getItem("runs")||"[]");
   const list = document.getElementById("list");
   list.innerHTML = "";
-  if(runs.length === 0){
-    list.innerHTML = '<div style="opacity:0.5;text-align:center;">Nog geen runs</div>';
+
+  if(running){
+    const live = document.createElement("div");
+    live.id = "liveCard";
+    live.className = "item";
+    live.style.background = "rgba(74,222,128,0.15)";
+    live.style.border = "1px solid #4ade80";
+    live.style.cursor = "default";
+    live.innerHTML = `<span>&#128994; LIVE</span><span><span class="liveDist">${(liveDistanceMeters()/1000).toFixed(2)} km</span> &middot; <span class="liveTime">${formatTime(Date.now()-startTime)}</span></span>`;
+    list.appendChild(live);
+  }
+
+  if(runs.length === 0 && !running){
+    list.innerHTML += '<div style="opacity:0.5;text-align:center;">No runs yet</div>';
     return;
   }
+
   runs.forEach((r)=>{
     let totalDist = 0;
     for(let j=1; j<r.points.length; j++) totalDist += getDistance(r.points[j-1], r.points[j]);
@@ -294,13 +395,13 @@ function loadRuns(){
 
     let div = document.createElement("div");
     div.className = "item";
-    div.innerHTML = `<span>${dateStr}</span><span>${(totalDist/1000).toFixed(2)} km · ${formatTime(durationMs)}</span>`;
+    div.innerHTML = `<span>${dateStr}</span><span>${(totalDist/1000).toFixed(2)} km &middot; ${formatTime(durationMs)}</span>`;
     div.onclick = () => showRun(r);
     list.appendChild(div);
   });
 }
 
-/* ---------- Route importeren ---------- */
+/* ---------- Import a route ---------- */
 document.getElementById("importBtn").onclick = () => document.getElementById("importFile").click();
 document.getElementById("importFile").addEventListener("change", (e)=>{
   const file = e.target.files[0];
@@ -310,7 +411,7 @@ document.getElementById("importFile").addEventListener("change", (e)=>{
     try{
       const run = JSON.parse(ev.target.result);
       if(!run.points || !Array.isArray(run.points) || run.points.length === 0){
-        throw new Error("ongeldig");
+        throw new Error("invalid");
       }
       if(!run.start) run.start = Date.now();
       let runs = JSON.parse(localStorage.getItem("runs")||"[]");
@@ -318,63 +419,29 @@ document.getElementById("importFile").addEventListener("change", (e)=>{
       localStorage.setItem("runs", JSON.stringify(runs));
       loadRuns();
     } catch(err){
-      alert("Kon dit bestand niet importeren, het is geen geldig RunFlow-bestand.");
+      alert("Could not import this file, it's not a valid RunFlow file.");
     }
   };
   reader.readAsText(file);
   e.target.value = "";
 });
 
-/* ---------- Route weergeven ---------- */
+/* ---------- Route view (satellite map, always shown) ---------- */
 function showRun(run){
   nav("view");
   currentRun = run;
   selected = [];
   highlightedRange = [];
   dotMarkers = [];
-  mapVisible = false;
-  document.getElementById("kaartBtn").classList.remove("on");
-  document.getElementById("routeMap").style.display = "none";
-  document.getElementById("routeSummary").style.display = "block";
   const info = document.getElementById("info");
   info.innerHTML = "";
   info.style.display = "none";
 
   displayPoints = mergeClosePoints(run.points, 8);
 
-  let totalDist = 0;
-  for(let j=1; j<run.points.length; j++) totalDist += getDistance(run.points[j-1], run.points[j]);
-  const durationMs = (run.end||Date.now()) - run.start;
-  const d = new Date(run.start);
-  const dateStr = pad(d.getDate())+'/'+pad(d.getMonth()+1)+'/'+d.getFullYear()+' '+pad(d.getHours())+':'+pad(d.getMinutes());
-
-  document.getElementById("summaryText").innerHTML = `
-    <div style="font-size:15px; opacity:0.7; margin-bottom:6px;">${dateStr}</div>
-    <div style="font-size:36px; font-weight:bold;">${(totalDist/1000).toFixed(2)} km</div>
-    <div style="font-size:16px; opacity:0.8; margin-top:6px;">${formatTime(durationMs)}</div>
-    <div style="font-size:13px; opacity:0.5; margin-top:24px;">Tik op "Kaart" om de route te bekijken</div>
-  `;
-}
-
-/* Kaart tonen/verbergen */
-document.getElementById("kaartBtn").onclick = ()=>{
-  if(!currentRun) return;
-  mapVisible = !mapVisible;
-  document.getElementById("kaartBtn").classList.toggle("on", mapVisible);
-  if(mapVisible){
-    document.getElementById("routeSummary").style.display = "none";
-    document.getElementById("routeMap").style.display = "block";
-    renderMap();
-  } else {
-    document.getElementById("routeMap").style.display = "none";
-    document.getElementById("routeSummary").style.display = "block";
-  }
-};
-
-function renderMap(){
   if(!routeMap){
     routeMap = L.map("routeMap", { zoomControl: false, attributionControl: false });
-    // Satellietbeelden (geen straatnamen/lijnen): je ziet groen, water en huizen
+    // Satellite imagery (no street names/lines): shows green, water and houses
     L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
       maxZoom: 19
     }).addTo(routeMap);
@@ -383,10 +450,6 @@ function renderMap(){
 
   if(routeLayerGroup){ routeMap.removeLayer(routeLayerGroup); }
   if(activeLineLayer){ routeMap.removeLayer(activeLineLayer); activeLineLayer = null; }
-  selected = [];
-  highlightedRange = [];
-  document.getElementById("info").style.display = "none";
-  dotMarkers = [];
 
   const latlngs = displayPoints.map(p => [p.lat, p.lon]);
   const line = L.polyline(latlngs, { color: "#ffffff", weight: 2, opacity: 0.6 });
@@ -409,7 +472,7 @@ function renderMap(){
   }, 50);
 }
 
-/* Klik overal op de kaart -> pakt automatisch het dichtstbijzijnde punt */
+/* Click anywhere on the map -> automatically snaps to the nearest point */
 function onMapClick(e){
   if(!displayPoints.length) return;
   let best = -1, bestDist = Infinity;
@@ -442,7 +505,7 @@ function updateInfo(){
 
   if(selected.length === 1){
     const { p } = selected[0];
-    info.innerHTML = `Tijd: ${formatTime(p.t)}`;
+    info.innerHTML = `Time: ${formatTime(p.t)}`;
     info.style.display = "block";
     return;
   }
@@ -461,15 +524,15 @@ function updateInfo(){
       highlightedRange.push(idx);
     }
 
-    info.innerHTML = `Tijd: ${formatTime(a.p.t)} → ${formatTime(b.p.t)}<br>Afstand: ${dist.toFixed(0)} m<br>Duur: ${formatTime(dt)}`;
+    info.innerHTML = `Time: ${formatTime(a.p.t)} &rarr; ${formatTime(b.p.t)}<br>Distance: ${dist.toFixed(0)} m<br>Duration: ${formatTime(dt)}`;
     info.style.display = "block";
   }
 }
 
-/* ---------- Verwijderen & exporteren ---------- */
+/* ---------- Delete & export ---------- */
 document.getElementById("deleteBtn").onclick = ()=>{
   if(!currentRun) return;
-  if(confirm("Deze route verwijderen?")){
+  if(confirm("Delete this route?")){
     let runs = JSON.parse(localStorage.getItem("runs")||"[]");
     runs = runs.filter(r => r.start !== currentRun.start);
     localStorage.setItem("runs", JSON.stringify(runs));
@@ -493,19 +556,19 @@ document.getElementById("exportBtn").onclick = ()=>{
   URL.revokeObjectURL(url);
 };
 
-/* ---------- Testroute Amersfoort ---------- */
+/* ---------- Sample test route (Amersfoort) ---------- */
 function seedTestRoute(){
   let runs = JSON.parse(localStorage.getItem("runs")||"[]");
   if(runs.length > 0) return;
-  const centerLat = 52.1561, centerLon = 5.3878; // centrum Amersfoort
+  const centerLat = 52.1561, centerLon = 5.3878; // Amersfoort city center
   const n = 40;
   const points = [];
   for(let i=0; i<=n; i++){
     const angle = (i/n) * Math.PI * 2;
-    const r = 0.009; // ongeveer 1 km straal
+    const r = 0.009; // roughly a 1 km radius
     const lat = centerLat + r*Math.sin(angle);
     const lon = centerLon + (r*Math.cos(angle)) / Math.cos(centerLat*Math.PI/180);
-    points.push({ lat, lon, t: i * 30000 }); // elke 30s een punt
+    points.push({ lat, lon, t: i * 30000 }); // one point every 30s
   }
   const startTs = Date.now() - (24*60*60*1000);
   const testRun = { start: startTs, end: startTs + n*30000, points };

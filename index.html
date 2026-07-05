@@ -4,24 +4,25 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
 <title>RunFlow</title>
-<link rel="manifest" href="manifest.json"> 
+<link rel="manifest" href="manifest.json">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
 <style>
 body { margin: 0; background: #0b1220; font-family: system-ui; color: white; overflow: hidden; }
 .header { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; font-weight: bold; z-index: 500; transition: opacity .3s; }
 .actions { display: flex; gap: 8px; }
 .btn { padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); cursor: pointer; background: rgba(0,0,0,0.5); }
+.btn.on { background: #4ade80; color: #000; border-color: #4ade80; }
 .screen { display: none; height: 100vh; width: 100%; align-items: center; justify-content: center; flex-direction: column; box-sizing: border-box; position: relative; }
 .active { display: flex; }
-.bigbtn { width: 180px; height: 180px; border-radius: 50%; border: none; font-size: 20px; font-weight: bold; background: white; color: black; cursor: pointer; transition: opacity .3s; }
-.timer { margin-top: 15px; font-size: 28px; font-variant-numeric: tabular-nums; transition: opacity .3s; }
+.bigbtn { width: 180px; height: 180px; border-radius: 50%; border: none; font-size: 20px; font-weight: bold; background: white; color: black; cursor: pointer; }
+.timer { margin-top: 15px; font-size: 28px; font-variant-numeric: tabular-nums; }
 .list { width: 80%; max-width: 400px; display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow-y: auto; }
 .item { padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.05); cursor: pointer; display: flex; justify-content: space-between; user-select: none; -webkit-user-select: none; }
 #routeMap { width: 100%; height: 100%; }
-.info { position: absolute; bottom: 30px; left: 10%; width: 80%; max-width: 400px; text-align: left; font-size: 13px; background: rgba(0,0,0,0.75); padding: 15px; border-radius: 8px; line-height: 1.6; display: none; z-index: 500; }
+.info { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); width: 80%; max-width: 400px; text-align: left; font-size: 13px; background: rgba(0,0,0,0.75); padding: 15px; border-radius: 8px; line-height: 1.6; display: none; z-index: 500; }
 .info a { color: #4ade80; }
 
-/* Donker scherm tijdens het lopen (batterijbesparing): een zwarte overlay boven alles */
+/* Handmatig donker scherm: een zwarte overlay boven alles */
 #dimOverlay {
   position: fixed;
   inset: 0;
@@ -39,13 +40,18 @@ body.dim #dimOverlay { display: block; }
 <div class="header">
   <div id="navBtn" class="btn">Routes</div>
   <div class="actions">
+    <div id="dimBtn" class="btn" style="display:none;">Slaap</div>
+    <div id="importBtn" class="btn" style="display:none;">Import</div>
+    <div id="mapsBtn" class="btn" style="display:none;">Maps</div>
     <div id="exportBtn" class="btn" style="display:none;">Export</div>
     <div id="deleteBtn" class="btn" style="display:none;">Verwijderen</div>
   </div>
 </div>
 
+<input type="file" id="importFile" accept="application/json,.json" style="display:none;">
+
 <div id="run" class="screen active">
-  <button class="bigbtn" id="btn" onclick="event.stopPropagation(); toggleRun();">START</button>
+  <button class="bigbtn" id="btn" onclick="toggleRun();">START</button>
   <div class="timer" id="timer">00:00:00</div>
 </div>
 
@@ -61,13 +67,18 @@ body.dim #dimOverlay { display: block; }
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 let running = false, startTime, interval, tempRun, watchId;
+let currentCluster = [];
+const RECORD_CLUSTER_RADIUS = 15; // meter: stilstaan binnen deze straal telt als 1 plek
+
 let selected = [];
+let highlightedRange = [];
 let currentRun = null;
 let displayPoints = [];
 let routeMap = null;
 let routeLayerGroup = null;
 let activeLineLayer = null;
 let dotMarkers = [];
+let showMapsLinks = false;
 
 /* ---------- Helpers ---------- */
 function pad(n){ return n.toString().padStart(2,'0'); }
@@ -88,16 +99,30 @@ function getDistance(p1, p2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-/* Voegt opeenvolgende punten die dicht bij elkaar liggen (bv. stilstaan) samen tot 1 punt */
+function centroid(points){
+  let latSum = 0, lonSum = 0;
+  points.forEach(p=>{ latSum += p.lat; lonSum += p.lon; });
+  return { lat: latSum/points.length, lon: lonSum/points.length };
+}
+
+/* Groepeert opeenvolgende punten die dicht bij elkaar liggen (bv. stilstaan)
+   en toont daarvan de gemiddelde plek in plaats van losse, verspreide punten */
 function mergeClosePoints(points, thresholdMeters){
   if(!points.length) return points;
-  const merged = [points[0]];
+  const merged = [];
+  let cluster = [points[0]];
   for(let i=1; i<points.length; i++){
-    const last = merged[merged.length-1];
-    if(getDistance(last, points[i]) >= thresholdMeters){
-      merged.push(points[i]);
+    const c = centroid(cluster);
+    if(getDistance(c, points[i]) <= thresholdMeters){
+      cluster.push(points[i]);
+    } else {
+      const avg = centroid(cluster);
+      merged.push({ lat: avg.lat, lon: avg.lon, t: cluster[0].t });
+      cluster = [points[i]];
     }
   }
+  const avg = centroid(cluster);
+  merged.push({ lat: avg.lat, lon: avg.lon, t: cluster[0].t });
   return merged;
 }
 
@@ -106,21 +131,30 @@ function nav(screen){
   document.querySelectorAll(".screen").forEach(x=>x.classList.remove("active"));
   document.getElementById(screen).classList.add("active");
   const navBtn = document.getElementById("navBtn");
+  const dimBtn = document.getElementById("dimBtn");
+  const importBtn = document.getElementById("importBtn");
+  const mapsBtn = document.getElementById("mapsBtn");
   const exportBtn = document.getElementById("exportBtn");
   const deleteBtn = document.getElementById("deleteBtn");
+  dimBtn.style.display = "none";
+  importBtn.style.display = "none";
+  mapsBtn.style.display = "none";
   exportBtn.style.display = "none";
   deleteBtn.style.display = "none";
 
   if(screen === "run"){
     navBtn.innerText = "Routes";
     navBtn.onclick = () => nav("routes");
+    dimBtn.style.display = "block";
   } else if(screen === "routes"){
     navBtn.innerText = "Start";
     navBtn.onclick = () => nav("run");
+    importBtn.style.display = "block";
     loadRuns();
   } else if(screen === "view"){
     navBtn.innerText = "Terug";
     navBtn.onclick = () => nav("routes");
+    mapsBtn.style.display = "block";
     exportBtn.style.display = "block";
     deleteBtn.style.display = "block";
   }
@@ -130,18 +164,25 @@ function nav(screen){
 function startRun(){
   running = true;
   document.getElementById("btn").innerText = "STOP";
-  document.body.classList.add("dim"); // scherm gaat direct donker
   startTime = Date.now();
   tempRun = { start: startTime, points: [] };
+  currentCluster = [];
   interval = setInterval(()=>{
     document.getElementById("timer").innerText = formatTime(Date.now()-startTime);
   }, 1000);
   watchId = navigator.geolocation.watchPosition(p=>{
     const newPoint = { lat: p.coords.latitude, lon: p.coords.longitude, t: Date.now()-startTime };
-    const last = tempRun.points[tempRun.points.length-1];
-    // sla alleen een nieuw punt op als er echt beweging is (voorkomt opeenstapeling bij stilstaan)
-    if(!last || getDistance(last, newPoint) >= 5){
-      tempRun.points.push(newPoint);
+    if(currentCluster.length === 0){
+      currentCluster.push(newPoint);
+    } else {
+      const c = centroid(currentCluster);
+      if(getDistance(c, newPoint) <= RECORD_CLUSTER_RADIUS){
+        currentCluster.push(newPoint);
+      } else {
+        const avg = centroid(currentCluster);
+        tempRun.points.push({ lat: avg.lat, lon: avg.lon, t: currentCluster[0].t });
+        currentCluster = [newPoint];
+      }
     }
   }, null, { enableHighAccuracy: true });
 }
@@ -153,7 +194,11 @@ function toggleRun(){
     running = false;
     clearInterval(interval);
     navigator.geolocation.clearWatch(watchId);
-    document.body.classList.remove("dim");
+    if(currentCluster.length){
+      const avg = centroid(currentCluster);
+      tempRun.points.push({ lat: avg.lat, lon: avg.lon, t: currentCluster[0].t });
+      currentCluster = [];
+    }
     tempRun.end = Date.now();
     let runs = JSON.parse(localStorage.getItem("runs")||"[]");
     runs.unshift(tempRun);
@@ -164,13 +209,10 @@ function toggleRun(){
   }
 }
 
-/* Scherm donker/licht togglen tijdens het lopen */
-document.getElementById("run").addEventListener("click", (e)=>{
-  if(!running) return;
-  if(e.target.id === "btn") return;
+/* Handmatig scherm donker maken; klik op het zwart schakelt weer uit */
+document.getElementById("dimBtn").onclick = ()=>{
   document.body.classList.add("dim");
-});
-
+};
 document.getElementById("dimOverlay").addEventListener("click", ()=>{
   document.body.classList.remove("dim");
 });
@@ -199,18 +241,46 @@ function loadRuns(){
   });
 }
 
+/* ---------- Route importeren ---------- */
+document.getElementById("importBtn").onclick = () => document.getElementById("importFile").click();
+document.getElementById("importFile").addEventListener("change", (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev)=>{
+    try{
+      const run = JSON.parse(ev.target.result);
+      if(!run.points || !Array.isArray(run.points) || run.points.length === 0){
+        throw new Error("ongeldig");
+      }
+      if(!run.start) run.start = Date.now();
+      let runs = JSON.parse(localStorage.getItem("runs")||"[]");
+      runs.unshift(run);
+      localStorage.setItem("runs", JSON.stringify(runs));
+      loadRuns();
+    } catch(err){
+      alert("Kon dit bestand niet importeren, het is geen geldig RunFlow-bestand.");
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = "";
+});
+
 /* ---------- Route weergeven op satellietkaart ---------- */
 function showRun(run){
   nav("view");
   currentRun = run;
   selected = [];
+  highlightedRange = [];
   dotMarkers = [];
+  showMapsLinks = false;
+  document.getElementById("mapsBtn").classList.remove("on");
   const info = document.getElementById("info");
   info.innerHTML = "";
   info.style.display = "none";
 
-  // dicht bij elkaar liggende punten (bv. bij stilstaan) samenvoegen tot 1 punt
-  displayPoints = mergeClosePoints(run.points, 8);
+  // dicht bij elkaar liggende punten (bv. bij stilstaan) samenvoegen tot 1 gemiddeld punt
+  displayPoints = mergeClosePoints(run.points, 15);
 
   if(!routeMap){
     routeMap = L.map("routeMap", { zoomControl: false, attributionControl: false });
@@ -256,10 +326,16 @@ function onMapClick(e){
   if(best >= 0) selectPoint(displayPoints[best], best, dotMarkers[best]);
 }
 
+function resetMarkerStyle(idx){
+  dotMarkers[idx].setStyle({ color: "#fff", fillColor: "#fff" });
+}
+
 function selectPoint(p, i, el){
   // na een vergelijking van 2 punten begint een nieuwe klik altijd weer bij 1 punt
   if(selected.length === 2){
-    selected.forEach(s => s.el.setStyle({ color: "#fff", fillColor: "#fff" }));
+    selected.forEach(s => resetMarkerStyle(s.i));
+    highlightedRange.forEach(idx => resetMarkerStyle(idx));
+    highlightedRange = [];
     selected = [];
   }
   selected.push({ p, i, el });
@@ -274,7 +350,9 @@ function updateInfo(){
 
   if(selected.length === 1){
     const { p } = selected[0];
-    info.innerHTML = `Tijd: ${formatTime(p.t)}<br><a href="https://www.google.com/maps?q=${p.lat},${p.lon}" target="_blank">Bekijk op Maps</a>`;
+    let html = `Tijd: ${formatTime(p.t)}`;
+    if(showMapsLinks) html += `<br><a href="https://www.google.com/maps?q=${p.lat},${p.lon}" target="_blank">Bekijk op Maps</a>`;
+    info.innerHTML = html;
     info.style.display = "block";
     return;
   }
@@ -286,10 +364,29 @@ function updateInfo(){
     const dt = b.p.t - a.p.t;
     const seg = displayPoints.slice(a.i, b.i+1).map(p=>[p.lat, p.lon]);
     activeLineLayer = L.polyline(seg, { color: "#4ade80", weight: 4 }).addTo(routeMap);
-    info.innerHTML = `Tijd: ${formatTime(a.p.t)} → ${formatTime(b.p.t)}<br>Afstand: ${dist.toFixed(0)} m<br>Duur: ${formatTime(dt)}<br><a href="https://www.google.com/maps?q=${a.p.lat},${a.p.lon}" target="_blank">Punt 1 op Maps</a> · <a href="https://www.google.com/maps?q=${b.p.lat},${b.p.lon}" target="_blank">Punt 2 op Maps</a>`;
+
+    // alle punten tussen a en b ook groen markeren
+    highlightedRange = [];
+    for(let idx = a.i; idx <= b.i; idx++){
+      dotMarkers[idx].setStyle({ color: "#4ade80", fillColor: "#4ade80" });
+      highlightedRange.push(idx);
+    }
+
+    let html = `Tijd: ${formatTime(a.p.t)} → ${formatTime(b.p.t)}<br>Afstand: ${dist.toFixed(0)} m<br>Duur: ${formatTime(dt)}`;
+    if(showMapsLinks){
+      html += `<br><a href="https://www.google.com/maps?q=${a.p.lat},${a.p.lon}" target="_blank">Punt 1 op Maps</a> · <a href="https://www.google.com/maps?q=${b.p.lat},${b.p.lon}" target="_blank">Punt 2 op Maps</a>`;
+    }
+    info.innerHTML = html;
     info.style.display = "block";
   }
 }
+
+/* Maps-links aan/uit schakelen in het infoblok */
+document.getElementById("mapsBtn").onclick = ()=>{
+  showMapsLinks = !showMapsLinks;
+  document.getElementById("mapsBtn").classList.toggle("on", showMapsLinks);
+  updateInfo();
+};
 
 /* ---------- Verwijderen & exporteren ---------- */
 document.getElementById("deleteBtn").onclick = ()=>{

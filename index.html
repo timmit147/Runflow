@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
 <style>
 body { margin: 0; background: #0b1220; font-family: system-ui; color: white; overflow: hidden; }
-.header { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; font-weight: bold; z-index: 500; transition: opacity .3s; }
+.header { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; font-weight: bold; z-index: 500; }
 .actions { display: flex; gap: 8px; }
 .btn { padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2); cursor: pointer; background: rgba(0,0,0,0.5); }
 .btn.on { background: #4ade80; color: #000; border-color: #4ade80; }
@@ -18,9 +18,9 @@ body { margin: 0; background: #0b1220; font-family: system-ui; color: white; ove
 .timer { margin-top: 15px; font-size: 28px; font-variant-numeric: tabular-nums; }
 .list { width: 80%; max-width: 400px; display: flex; flex-direction: column; gap: 10px; max-height: 70vh; overflow-y: auto; }
 .item { padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.05); cursor: pointer; display: flex; justify-content: space-between; user-select: none; -webkit-user-select: none; }
-#routeMap { width: 100%; height: 100%; }
+#routeMap { width: 100%; height: 100%; display: none; }
+#routeSummary { text-align: center; }
 .info { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); width: 80%; max-width: 400px; text-align: left; font-size: 13px; background: rgba(0,0,0,0.75); padding: 15px; border-radius: 8px; line-height: 1.6; display: none; z-index: 500; }
-.info a { color: #4ade80; }
 
 /* Handmatig donker scherm: een zwarte overlay boven alles */
 #dimOverlay {
@@ -42,7 +42,7 @@ body.dim #dimOverlay { display: block; }
   <div class="actions">
     <div id="dimBtn" class="btn" style="display:none;">Slaap</div>
     <div id="importBtn" class="btn" style="display:none;">Import</div>
-    <div id="mapsBtn" class="btn" style="display:none;">Maps</div>
+    <div id="kaartBtn" class="btn" style="display:none;">Kaart</div>
     <div id="exportBtn" class="btn" style="display:none;">Export</div>
     <div id="deleteBtn" class="btn" style="display:none;">Verwijderen</div>
   </div>
@@ -60,6 +60,7 @@ body.dim #dimOverlay { display: block; }
 </div>
 
 <div id="view" class="screen">
+  <div id="routeSummary"><div id="summaryText"></div></div>
   <div id="routeMap"></div>
   <div class="info" id="info"></div>
 </div>
@@ -67,9 +68,74 @@ body.dim #dimOverlay { display: block; }
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 let running = false, startTime, interval, tempRun, watchId;
-let currentCluster = [];
-const RECORD_CLUSTER_RADIUS = 15; // meter: stilstaan binnen deze straal telt als 1 plek
 
+/* ---------- GPS-verwerkingspipeline (real-time) ---------- */
+const ACCURACY_MAX = 25;      // meter, verwerp minder nauwkeurige fixes
+const SPEED_MAX = 6;          // m/s, verwerp onrealistische sprongen
+const JITTER_MIN = 3;         // meter, negeer ruis dichter dan dit
+const EMA_ALPHA = 0.3;        // gladstrijken van de route
+const STOP_SPEED = 0.5;       // m/s, onder dit = "stilstaan"
+const STOP_DURATION = 10000;  // ms, hoe lang stilstaan moet duren om als pauze te gelden
+
+let lastRaw = null;         // laatste ruwe fix (voor snelheidsberekening), ongeacht of geaccepteerd
+let lastRoutePoint = null;  // laatste punt dat echt aan de route is toegevoegd
+let lowSpeedSince = null;   // tijdstip vanaf wanneer de snelheid laag is
+let isPaused = false;       // zit de gebruiker in een pauze/stilstand
+
+function processRawSample(raw){
+  // 1. te onnauwkeurige fix negeren
+  if(raw.accuracy != null && raw.accuracy > ACCURACY_MAX) return;
+
+  // snelheid bepalen (uit device, of berekend uit afstand/tijd t.o.v. vorige ruwe fix)
+  let instSpeed = 0;
+  if(lastRaw){
+    const dt = (raw.timestamp - lastRaw.timestamp) / 1000;
+    const dist = getDistance(lastRaw, raw);
+    instSpeed = dt > 0 ? dist / dt : 0;
+  }
+  if(typeof raw.speed === "number" && raw.speed >= 0){
+    instSpeed = Math.max(instSpeed, raw.speed);
+  }
+
+  // 2. onrealistische sprong (GPS-spike) negeren
+  if(lastRaw && instSpeed > SPEED_MAX){
+    lastRaw = raw;
+    return;
+  }
+
+  // 3. stop-detectie: aanhoudend lage snelheid = pauze, route niet laten afwijken
+  if(instSpeed < STOP_SPEED){
+    if(lowSpeedSince === null) lowSpeedSince = raw.timestamp;
+    if(raw.timestamp - lowSpeedSince >= STOP_DURATION){
+      isPaused = true;
+    }
+  } else {
+    lowSpeedSince = null;
+    isPaused = false;
+  }
+
+  lastRaw = raw;
+
+  if(isPaused) return; // tijdens pauze geen nieuwe punten toevoegen: route blijft stabiel staan
+
+  // 4. jitter verwijderen: te dichtbij het laatste routepunt = negeren
+  if(lastRoutePoint && getDistance(lastRoutePoint, raw) < JITTER_MIN) return;
+
+  // 5. smoothing met exponential moving average
+  let lat, lon;
+  if(!lastRoutePoint){
+    lat = raw.lat; lon = raw.lon;
+  } else {
+    lat = EMA_ALPHA*raw.lat + (1-EMA_ALPHA)*lastRoutePoint.lat;
+    lon = EMA_ALPHA*raw.lon + (1-EMA_ALPHA)*lastRoutePoint.lon;
+  }
+
+  const newPoint = { lat, lon, t: raw.timestamp - startTime };
+  tempRun.points.push(newPoint);
+  lastRoutePoint = newPoint;
+}
+
+/* ---------- Overig ---------- */
 let selected = [];
 let highlightedRange = [];
 let currentRun = null;
@@ -78,7 +144,7 @@ let routeMap = null;
 let routeLayerGroup = null;
 let activeLineLayer = null;
 let dotMarkers = [];
-let showMapsLinks = false;
+let mapVisible = false;
 
 /* ---------- Helpers ---------- */
 function pad(n){ return n.toString().padStart(2,'0'); }
@@ -105,8 +171,7 @@ function centroid(points){
   return { lat: latSum/points.length, lon: lonSum/points.length };
 }
 
-/* Groepeert opeenvolgende punten die dicht bij elkaar liggen (bv. stilstaan)
-   en toont daarvan de gemiddelde plek in plaats van losse, verspreide punten */
+/* Extra vangnet voor oude/geimporteerde routes die niet door de nieuwe pipeline zijn gelopen */
 function mergeClosePoints(points, thresholdMeters){
   if(!points.length) return points;
   const merged = [];
@@ -133,12 +198,12 @@ function nav(screen){
   const navBtn = document.getElementById("navBtn");
   const dimBtn = document.getElementById("dimBtn");
   const importBtn = document.getElementById("importBtn");
-  const mapsBtn = document.getElementById("mapsBtn");
+  const kaartBtn = document.getElementById("kaartBtn");
   const exportBtn = document.getElementById("exportBtn");
   const deleteBtn = document.getElementById("deleteBtn");
   dimBtn.style.display = "none";
   importBtn.style.display = "none";
-  mapsBtn.style.display = "none";
+  kaartBtn.style.display = "none";
   exportBtn.style.display = "none";
   deleteBtn.style.display = "none";
 
@@ -154,7 +219,7 @@ function nav(screen){
   } else if(screen === "view"){
     navBtn.innerText = "Terug";
     navBtn.onclick = () => nav("routes");
-    mapsBtn.style.display = "block";
+    kaartBtn.style.display = "block";
     exportBtn.style.display = "block";
     deleteBtn.style.display = "block";
   }
@@ -166,24 +231,23 @@ function startRun(){
   document.getElementById("btn").innerText = "STOP";
   startTime = Date.now();
   tempRun = { start: startTime, points: [] };
-  currentCluster = [];
+  lastRaw = null;
+  lastRoutePoint = null;
+  lowSpeedSince = null;
+  isPaused = false;
+
   interval = setInterval(()=>{
     document.getElementById("timer").innerText = formatTime(Date.now()-startTime);
   }, 1000);
+
   watchId = navigator.geolocation.watchPosition(p=>{
-    const newPoint = { lat: p.coords.latitude, lon: p.coords.longitude, t: Date.now()-startTime };
-    if(currentCluster.length === 0){
-      currentCluster.push(newPoint);
-    } else {
-      const c = centroid(currentCluster);
-      if(getDistance(c, newPoint) <= RECORD_CLUSTER_RADIUS){
-        currentCluster.push(newPoint);
-      } else {
-        const avg = centroid(currentCluster);
-        tempRun.points.push({ lat: avg.lat, lon: avg.lon, t: currentCluster[0].t });
-        currentCluster = [newPoint];
-      }
-    }
+    processRawSample({
+      lat: p.coords.latitude,
+      lon: p.coords.longitude,
+      accuracy: p.coords.accuracy,
+      speed: p.coords.speed,
+      timestamp: p.timestamp || Date.now()
+    });
   }, null, { enableHighAccuracy: true });
 }
 
@@ -194,11 +258,6 @@ function toggleRun(){
     running = false;
     clearInterval(interval);
     navigator.geolocation.clearWatch(watchId);
-    if(currentCluster.length){
-      const avg = centroid(currentCluster);
-      tempRun.points.push({ lat: avg.lat, lon: avg.lon, t: currentCluster[0].t });
-      currentCluster = [];
-    }
     tempRun.end = Date.now();
     let runs = JSON.parse(localStorage.getItem("runs")||"[]");
     runs.unshift(tempRun);
@@ -266,25 +325,56 @@ document.getElementById("importFile").addEventListener("change", (e)=>{
   e.target.value = "";
 });
 
-/* ---------- Route weergeven op satellietkaart ---------- */
+/* ---------- Route weergeven ---------- */
 function showRun(run){
   nav("view");
   currentRun = run;
   selected = [];
   highlightedRange = [];
   dotMarkers = [];
-  showMapsLinks = false;
-  document.getElementById("mapsBtn").classList.remove("on");
+  mapVisible = false;
+  document.getElementById("kaartBtn").classList.remove("on");
+  document.getElementById("routeMap").style.display = "none";
+  document.getElementById("routeSummary").style.display = "block";
   const info = document.getElementById("info");
   info.innerHTML = "";
   info.style.display = "none";
 
-  // dicht bij elkaar liggende punten (bv. bij stilstaan) samenvoegen tot 1 gemiddeld punt
-  displayPoints = mergeClosePoints(run.points, 15);
+  displayPoints = mergeClosePoints(run.points, 8);
 
+  let totalDist = 0;
+  for(let j=1; j<run.points.length; j++) totalDist += getDistance(run.points[j-1], run.points[j]);
+  const durationMs = (run.end||Date.now()) - run.start;
+  const d = new Date(run.start);
+  const dateStr = pad(d.getDate())+'/'+pad(d.getMonth()+1)+'/'+d.getFullYear()+' '+pad(d.getHours())+':'+pad(d.getMinutes());
+
+  document.getElementById("summaryText").innerHTML = `
+    <div style="font-size:15px; opacity:0.7; margin-bottom:6px;">${dateStr}</div>
+    <div style="font-size:36px; font-weight:bold;">${(totalDist/1000).toFixed(2)} km</div>
+    <div style="font-size:16px; opacity:0.8; margin-top:6px;">${formatTime(durationMs)}</div>
+    <div style="font-size:13px; opacity:0.5; margin-top:24px;">Tik op "Kaart" om de route te bekijken</div>
+  `;
+}
+
+/* Kaart tonen/verbergen */
+document.getElementById("kaartBtn").onclick = ()=>{
+  if(!currentRun) return;
+  mapVisible = !mapVisible;
+  document.getElementById("kaartBtn").classList.toggle("on", mapVisible);
+  if(mapVisible){
+    document.getElementById("routeSummary").style.display = "none";
+    document.getElementById("routeMap").style.display = "block";
+    renderMap();
+  } else {
+    document.getElementById("routeMap").style.display = "none";
+    document.getElementById("routeSummary").style.display = "block";
+  }
+};
+
+function renderMap(){
   if(!routeMap){
     routeMap = L.map("routeMap", { zoomControl: false, attributionControl: false });
-    // Satellietbeelden (geen straatnamen/lijnen), zodat je groen, water en huizen ziet
+    // Satellietbeelden (geen straatnamen/lijnen): je ziet groen, water en huizen
     L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
       maxZoom: 19
     }).addTo(routeMap);
@@ -293,6 +383,10 @@ function showRun(run){
 
   if(routeLayerGroup){ routeMap.removeLayer(routeLayerGroup); }
   if(activeLineLayer){ routeMap.removeLayer(activeLineLayer); activeLineLayer = null; }
+  selected = [];
+  highlightedRange = [];
+  document.getElementById("info").style.display = "none";
+  dotMarkers = [];
 
   const latlngs = displayPoints.map(p => [p.lat, p.lon]);
   const line = L.polyline(latlngs, { color: "#ffffff", weight: 2, opacity: 0.6 });
@@ -331,7 +425,6 @@ function resetMarkerStyle(idx){
 }
 
 function selectPoint(p, i, el){
-  // na een vergelijking van 2 punten begint een nieuwe klik altijd weer bij 1 punt
   if(selected.length === 2){
     selected.forEach(s => resetMarkerStyle(s.i));
     highlightedRange.forEach(idx => resetMarkerStyle(idx));
@@ -345,14 +438,11 @@ function selectPoint(p, i, el){
 
 function updateInfo(){
   const info = document.getElementById("info");
-
   if(activeLineLayer){ routeMap.removeLayer(activeLineLayer); activeLineLayer = null; }
 
   if(selected.length === 1){
     const { p } = selected[0];
-    let html = `Tijd: ${formatTime(p.t)}`;
-    if(showMapsLinks) html += `<br><a href="https://www.google.com/maps?q=${p.lat},${p.lon}" target="_blank">Bekijk op Maps</a>`;
-    info.innerHTML = html;
+    info.innerHTML = `Tijd: ${formatTime(p.t)}`;
     info.style.display = "block";
     return;
   }
@@ -365,28 +455,16 @@ function updateInfo(){
     const seg = displayPoints.slice(a.i, b.i+1).map(p=>[p.lat, p.lon]);
     activeLineLayer = L.polyline(seg, { color: "#4ade80", weight: 4 }).addTo(routeMap);
 
-    // alle punten tussen a en b ook groen markeren
     highlightedRange = [];
     for(let idx = a.i; idx <= b.i; idx++){
       dotMarkers[idx].setStyle({ color: "#4ade80", fillColor: "#4ade80" });
       highlightedRange.push(idx);
     }
 
-    let html = `Tijd: ${formatTime(a.p.t)} → ${formatTime(b.p.t)}<br>Afstand: ${dist.toFixed(0)} m<br>Duur: ${formatTime(dt)}`;
-    if(showMapsLinks){
-      html += `<br><a href="https://www.google.com/maps?q=${a.p.lat},${a.p.lon}" target="_blank">Punt 1 op Maps</a> · <a href="https://www.google.com/maps?q=${b.p.lat},${b.p.lon}" target="_blank">Punt 2 op Maps</a>`;
-    }
-    info.innerHTML = html;
+    info.innerHTML = `Tijd: ${formatTime(a.p.t)} → ${formatTime(b.p.t)}<br>Afstand: ${dist.toFixed(0)} m<br>Duur: ${formatTime(dt)}`;
     info.style.display = "block";
   }
 }
-
-/* Maps-links aan/uit schakelen in het infoblok */
-document.getElementById("mapsBtn").onclick = ()=>{
-  showMapsLinks = !showMapsLinks;
-  document.getElementById("mapsBtn").classList.toggle("on", showMapsLinks);
-  updateInfo();
-};
 
 /* ---------- Verwijderen & exporteren ---------- */
 document.getElementById("deleteBtn").onclick = ()=>{

@@ -2,11 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover"/>
 <title>RunFlow</title>
 <link rel="manifest" href="manifest.json">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b1220">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
 <style>
+html, body { height: 100%; }
 body { margin: 0; background: #0b1220; font-family: system-ui; color: white; overflow: hidden; }
 .header { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; align-items: center; font-size: 14px; font-weight: bold; z-index: 500; }
 .actions { display: flex; gap: 8px; }
@@ -84,70 +89,204 @@ body { margin: 0; background: #0b1220; font-family: system-ui; color: white; ove
 <script>
 let running = false, startTime, interval, tempRun, watchId;
 
-/* ---------- Real-time GPS processing pipeline ---------- */
-const ACCURACY_MAX = 25;      // meters, reject less accurate fixes
-const SPEED_MAX = 6;          // m/s, reject unrealistic jumps
-const JITTER_MIN = 3;         // meters, ignore noise closer than this
-const EMA_ALPHA = 0.3;        // smooths the route
-const STOP_SPEED = 0.5;       // m/s, below this counts as "standing still"
-const STOP_DURATION = 10000;  // ms, how long standing still must last to count as a pause
+/* =====================================================================
+   REAL-TIME GPS PROCESSING PIPELINE
+   Goal: kill "ghost movement" almost entirely.
+   Pipeline per raw fix:
+     1. accuracy gate (stricter while standing still)
+     2. windowed weighted average of the last 5-10 fixes
+     3. per-axis Kalman filter (in local meters, not raw degrees)
+     4. heading-consistency check (rejects fixes that don't move in a
+        believable, sustained direction)
+     5. device-motion check (accelerometer says "not moving" -> trust that)
+     6. a 10m geofence + 10s dwell time to enter "stop mode"; once in
+        stop mode the route is frozen and can only resume after 15m of
+        confirmed real movement (hysteresis, prevents flapping)
+     7. a point is only committed to the route after BOTH >=3s and >=8m
+        of movement, confirmed over 3-5 consecutive fixes in a row
+   ===================================================================== */
 
-let lastRaw = null;         // last raw fix (for speed calc), whether accepted or not
-let lastRoutePoint = null;  // last point actually added to the route
-let lowSpeedSince = null;   // timestamp from when speed has been low
-let isPaused = false;       // is the user currently paused / standing still
+// -- tunable constants --
+const ACCURACY_MAX_MOVING = 25;      // m, reject fixes worse than this while moving
+const ACCURACY_MAX_STATIONARY = 10;  // m, stricter while standing still
+const FIX_BUFFER_SIZE = 8;           // fixes averaged together (5-10 range)
+const GEOFENCE_STATIONARY = 10;      // m, geofence radius used to detect "standing still"
+const STOP_ENTER_DURATION = 10000;   // ms of stillness before pause kicks in
+const STOP_EXIT_DISTANCE = 15;       // m of confirmed movement needed to leave pause
+const MIN_POINT_INTERVAL = 3000;     // ms, minimum time between saved points
+const MIN_POINT_DISTANCE = 8;        // m, minimum distance between saved points
+const CONFIRM_STREAK = 4;            // consecutive confirmed-movement fixes required (3-5)
+const HEADING_TOLERANCE = 55;        // degrees of allowed bearing drift between fixes
+const KALMAN_PROCESS_NOISE = 4;      // m^2, how quickly the filter trusts new movement
+const MOTION_STILL_VARIANCE = 0.3;   // accelerometer variance threshold for "not moving"
 
-function processRawSample(raw){
-  // 1. reject fixes that are too inaccurate
-  if(raw.accuracy != null && raw.accuracy > ACCURACY_MAX) return;
+// -- per-run state (reset in startRun) --
+let refLat = null, refLon = null;         // local projection origin
+let kalmanX, kalmanY;                     // Kalman filter state, in local meters
+let fixBuffer = [];                       // rolling buffer of recent raw fixes (local coords)
+let lastConfirmedPoint = null;            // last point actually committed to the route
+let lastFilteredForBearing = null;
+let bearingBuffer = [];
+let movementStreak = 0;
+let stopMode = false;
+let stopAnchor = null;
+let stillSince = null;
 
-  // determine speed (from device, or computed from distance/time vs previous raw fix)
-  let instSpeed = 0;
-  if(lastRaw){
-    const dt = (raw.timestamp - lastRaw.timestamp) / 1000;
-    const dist = getDistance(lastRaw, raw);
-    instSpeed = dt > 0 ? dist / dt : 0;
+// -- device motion (accelerometer) stillness detection --
+let deviceStationary = false;
+let motionSamples = [];
+
+function toLocalXY(lat, lon){
+  const x = (lon - refLon) * 111320 * Math.cos(refLat * Math.PI/180);
+  const y = (lat - refLat) * 111320;
+  return { x, y };
+}
+function fromLocalXY(x, y){
+  return {
+    lat: refLat + y/111320,
+    lon: refLon + x/(111320*Math.cos(refLat*Math.PI/180))
+  };
+}
+
+function makeKalman(){ return { value: null, variance: -1 }; }
+function kalmanUpdate(state, measurement, measurementNoise){
+  if(state.variance < 0){
+    state.value = measurement;
+    state.variance = measurementNoise;
+    return state.value;
   }
-  if(typeof raw.speed === "number" && raw.speed >= 0){
-    instSpeed = Math.max(instSpeed, raw.speed);
-  }
+  state.variance += KALMAN_PROCESS_NOISE;
+  const K = state.variance / (state.variance + measurementNoise);
+  state.value += K * (measurement - state.value);
+  state.variance *= (1 - K);
+  return state.value;
+}
 
-  // 2. reject unrealistic jumps (GPS spikes)
-  if(lastRaw && instSpeed > SPEED_MAX){
-    lastRaw = raw;
-    return;
-  }
+function weightedAverage(buffer){
+  let wSum = 0, xSum = 0, ySum = 0;
+  buffer.forEach(f=>{
+    const w = 1 / Math.max(f.accuracy, 1)**2;
+    wSum += w; xSum += f.x*w; ySum += f.y*w;
+  });
+  return { x: xSum/wSum, y: ySum/wSum, accuracy: Math.sqrt(1/wSum) };
+}
 
-  // 3. stop detection: sustained low speed = pause, don't let the route drift
-  if(instSpeed < STOP_SPEED){
-    if(lowSpeedSince === null) lowSpeedSince = raw.timestamp;
-    if(raw.timestamp - lowSpeedSince >= STOP_DURATION){
-      isPaused = true;
+function bearingBetween(p1, p2){
+  const lat1 = p1.lat*Math.PI/180, lat2 = p2.lat*Math.PI/180;
+  const dLon = (p2.lon-p1.lon)*Math.PI/180;
+  const y = Math.sin(dLon)*Math.cos(lat2);
+  const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
+  return (Math.atan2(y,x)*180/Math.PI + 360) % 360;
+}
+function angularDiff(a,b){
+  const d = Math.abs(a-b) % 360;
+  return d > 180 ? 360-d : d;
+}
+function isHeadingConsistent(bearings, tolerance){
+  if(bearings.length < 2) return true;
+  for(let i=1; i<bearings.length; i++){
+    if(angularDiff(bearings[i], bearings[i-1]) > tolerance) return false;
+  }
+  return true;
+}
+
+function handleDeviceMotion(event){
+  const acc = event.acceleration || event.accelerationIncludingGravity;
+  if(!acc) return;
+  const mag = Math.sqrt((acc.x||0)**2 + (acc.y||0)**2 + (acc.z||0)**2);
+  const now = Date.now();
+  motionSamples.push({ mag, t: now });
+  motionSamples = motionSamples.filter(s => now - s.t <= 2000);
+  if(motionSamples.length >= 5){
+    const mags = motionSamples.map(s=>s.mag);
+    const mean = mags.reduce((a,b)=>a+b,0)/mags.length;
+    const variance = mags.reduce((a,b)=>a+(b-mean)**2,0)/mags.length;
+    deviceStationary = variance < MOTION_STILL_VARIANCE;
+  }
+}
+
+function setupDeviceMotion(){
+  if(typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function"){
+    DeviceMotionEvent.requestPermission().then(state=>{
+      if(state === "granted") window.addEventListener("devicemotion", handleDeviceMotion);
+    }).catch(()=>{});
+  } else if(typeof DeviceMotionEvent !== "undefined"){
+    window.addEventListener("devicemotion", handleDeviceMotion);
+  }
+}
+function teardownDeviceMotion(){
+  window.removeEventListener("devicemotion", handleDeviceMotion);
+  deviceStationary = false;
+  motionSamples = [];
+}
+
+function handleGpsFix(raw){
+  if(refLat === null){ refLat = raw.lat; refLon = raw.lon; }
+
+  const accLimit = stopMode ? ACCURACY_MAX_STATIONARY : ACCURACY_MAX_MOVING;
+  if(raw.accuracy != null && raw.accuracy > accLimit) return; // reject inaccurate fix
+
+  const local = toLocalXY(raw.lat, raw.lon);
+  fixBuffer.push({ x: local.x, y: local.y, accuracy: raw.accuracy || 15 });
+  if(fixBuffer.length > FIX_BUFFER_SIZE) fixBuffer.shift();
+  const avg = weightedAverage(fixBuffer);
+
+  const fx = kalmanUpdate(kalmanX, avg.x, avg.accuracy**2);
+  const fy = kalmanUpdate(kalmanY, avg.y, avg.accuracy**2);
+  const filtered = fromLocalXY(fx, fy);
+  filtered.t = raw.timestamp - startTime;
+
+  const referencePoint = stopMode ? stopAnchor : (lastConfirmedPoint || filtered);
+  const dist = getDistance(referencePoint, filtered);
+
+  let headingConsistent = true;
+  if(lastFilteredForBearing && dist > 1){
+    const bearing = bearingBetween(lastFilteredForBearing, filtered);
+    bearingBuffer.push(bearing);
+    if(bearingBuffer.length > CONFIRM_STREAK) bearingBuffer.shift();
+    headingConsistent = isHeadingConsistent(bearingBuffer, HEADING_TOLERANCE);
+  }
+  lastFilteredForBearing = filtered;
+
+  const movingThisFix = dist > (stopMode ? 3 : 2) && headingConsistent && !deviceStationary;
+  movementStreak = movingThisFix ? movementStreak + 1 : 0;
+
+  if(!stopMode){
+    if(dist < GEOFENCE_STATIONARY && !movingThisFix){
+      if(stillSince === null) stillSince = raw.timestamp;
+      if(deviceStationary || (raw.timestamp - stillSince >= STOP_ENTER_DURATION)){
+        stopMode = true;
+        stopAnchor = lastConfirmedPoint || filtered;
+        movementStreak = 0;
+      }
+    } else {
+      stillSince = null;
+    }
+
+    if(!stopMode){
+      if(!lastConfirmedPoint){
+        tempRun.points.push(filtered);
+        lastConfirmedPoint = filtered;
+      } else {
+        const dt = raw.timestamp - (startTime + lastConfirmedPoint.t);
+        const d = getDistance(lastConfirmedPoint, filtered);
+        if(dt >= MIN_POINT_INTERVAL && d >= MIN_POINT_DISTANCE && movementStreak >= CONFIRM_STREAK){
+          tempRun.points.push(filtered);
+          lastConfirmedPoint = filtered;
+        }
+      }
     }
   } else {
-    lowSpeedSince = null;
-    isPaused = false;
+    const distFromAnchor = getDistance(stopAnchor, filtered);
+    if(distFromAnchor >= STOP_EXIT_DISTANCE && movementStreak >= CONFIRM_STREAK && !deviceStationary){
+      stopMode = false;
+      stillSince = null;
+      lastConfirmedPoint = filtered;
+      tempRun.points.push(filtered); // resume the route cleanly from here
+      movementStreak = 0;
+    }
+    // otherwise: frozen at stopAnchor, no ghost points added
   }
-
-  lastRaw = raw;
-
-  if(isPaused) return; // no new points while paused: the route stays put
-
-  // 4. remove jitter: too close to the last route point = ignore
-  if(lastRoutePoint && getDistance(lastRoutePoint, raw) < JITTER_MIN) return;
-
-  // 5. smoothing with an exponential moving average
-  let lat, lon;
-  if(!lastRoutePoint){
-    lat = raw.lat; lon = raw.lon;
-  } else {
-    lat = EMA_ALPHA*raw.lat + (1-EMA_ALPHA)*lastRoutePoint.lat;
-    lon = EMA_ALPHA*raw.lon + (1-EMA_ALPHA)*lastRoutePoint.lon;
-  }
-
-  const newPoint = { lat, lon, t: raw.timestamp - startTime };
-  tempRun.points.push(newPoint);
-  lastRoutePoint = newPoint;
 }
 
 /* ---------- State ---------- */
@@ -159,6 +298,9 @@ let routeMap = null;
 let routeLayerGroup = null;
 let activeLineLayer = null;
 let dotMarkers = [];
+let viewingLiveRun = false;
+let liveViewInterval = null;
+let liveMapInitialized = false;
 
 /* ---------- Helpers ---------- */
 function pad(n){ return n.toString().padStart(2,'0'); }
@@ -249,10 +391,19 @@ function startRun(){
   document.getElementById("btn").innerText = "STOP";
   startTime = Date.now();
   tempRun = { start: startTime, points: [] };
-  lastRaw = null;
-  lastRoutePoint = null;
-  lowSpeedSince = null;
-  isPaused = false;
+
+  refLat = null; refLon = null;
+  kalmanX = makeKalman(); kalmanY = makeKalman();
+  fixBuffer = [];
+  lastConfirmedPoint = null;
+  lastFilteredForBearing = null;
+  bearingBuffer = [];
+  movementStreak = 0;
+  stopMode = false;
+  stopAnchor = null;
+  stillSince = null;
+
+  setupDeviceMotion();
 
   interval = setInterval(()=>{
     const elapsed = Date.now()-startTime;
@@ -270,11 +421,12 @@ function startRun(){
   }, 1000);
 
   watchId = navigator.geolocation.watchPosition(p=>{
-    processRawSample({
+    handleGpsFix({
       lat: p.coords.latitude,
       lon: p.coords.longitude,
       accuracy: p.coords.accuracy,
       speed: p.coords.speed,
+      heading: p.coords.heading,
       timestamp: p.timestamp || Date.now()
     });
   }, null, { enableHighAccuracy: true });
@@ -287,12 +439,18 @@ function toggleRun(){
     running = false;
     clearInterval(interval);
     navigator.geolocation.clearWatch(watchId);
+    teardownDeviceMotion();
     tempRun.end = Date.now();
     let runs = JSON.parse(localStorage.getItem("runs")||"[]");
     runs.unshift(tempRun);
     localStorage.setItem("runs", JSON.stringify(runs));
     document.getElementById("btn").innerText = "START";
     document.getElementById("timer").innerText = "00:00:00";
+    if(viewingLiveRun){
+      clearInterval(liveViewInterval);
+      liveViewInterval = null;
+      viewingLiveRun = false;
+    }
     nav("routes");
   }
 }
@@ -301,9 +459,7 @@ function toggleRun(){
 function showLock(){
   document.getElementById("lockOverlay").classList.add("active");
   document.getElementById("slideHandle").style.left = "4px";
-  if(document.documentElement.requestFullscreen){
-    document.documentElement.requestFullscreen().catch(()=>{});
-  }
+  requestAppFullscreen();
   if(running){
     document.getElementById("lockTime").innerText = formatTime(Date.now()-startTime);
     document.getElementById("lockDist").innerText = (liveDistanceMeters()/1000).toFixed(2) + " km";
@@ -327,6 +483,21 @@ document.addEventListener("fullscreenchange", ()=>{
     document.getElementById("lockOverlay").classList.remove("active");
   }
 });
+
+/* ---------- Fullscreen by default ----------
+   Browsers won't allow auto-fullscreen without a user gesture, so we
+   request it on the very first tap anywhere in the app. On an installed
+   PWA (see manifest.json, display: "fullscreen") it opens fullscreen
+   automatically without needing this at all. */
+function requestAppFullscreen(){
+  if(document.documentElement.requestFullscreen && !document.fullscreenElement){
+    document.documentElement.requestFullscreen().catch(()=>{});
+  }
+}
+document.addEventListener("pointerdown", function firstTouch(){
+  requestAppFullscreen();
+  document.removeEventListener("pointerdown", firstTouch);
+}, { once: true });
 
 /* Slide-to-unlock: requires a deliberate drag, so it can't be triggered by accident */
 (function(){
@@ -376,8 +547,8 @@ function loadRuns(){
     live.className = "item";
     live.style.background = "rgba(74,222,128,0.15)";
     live.style.border = "1px solid #4ade80";
-    live.style.cursor = "default";
     live.innerHTML = `<span>&#128994; LIVE</span><span><span class="liveDist">${(liveDistanceMeters()/1000).toFixed(2)} km</span> &middot; <span class="liveTime">${formatTime(Date.now()-startTime)}</span></span>`;
+    live.onclick = () => showLiveRun();
     list.appendChild(live);
   }
 
@@ -426,9 +597,57 @@ document.getElementById("importFile").addEventListener("change", (e)=>{
   e.target.value = "";
 });
 
-/* ---------- Route view (satellite map, always shown) ---------- */
+/* ---------- Live map (route in progress) ---------- */
+function showLiveRun(){
+  if(!running) return;
+  nav("view");
+  viewingLiveRun = true;
+  currentRun = null;
+  liveMapInitialized = false;
+  document.getElementById("exportBtn").style.display = "none";
+  document.getElementById("deleteBtn").style.display = "none";
+  document.getElementById("info").style.display = "none";
+  document.getElementById("navBtn").innerText = "Back";
+  document.getElementById("navBtn").onclick = ()=>{
+    clearInterval(liveViewInterval);
+    liveViewInterval = null;
+    viewingLiveRun = false;
+    nav("routes");
+  };
+
+  renderLiveMap();
+  liveViewInterval = setInterval(renderLiveMap, 2000);
+}
+
+function renderLiveMap(){
+  const points = tempRun ? tempRun.points : [];
+  if(!routeMap){
+    routeMap = L.map("routeMap", { zoomControl: false, attributionControl: false });
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 19
+    }).addTo(routeMap);
+    routeMap.on("click", onMapClick);
+  }
+  if(routeLayerGroup){ routeMap.removeLayer(routeLayerGroup); }
+  if(points.length === 0) return;
+
+  const latlngs = points.map(p => [p.lat, p.lon]);
+  const line = L.polyline(latlngs, { color: "#4ade80", weight: 3 });
+  const current = L.circleMarker(latlngs[latlngs.length-1], { radius: 7, color: "#fff", weight: 2, fillColor: "#4ade80", fillOpacity: 1 });
+  routeLayerGroup = L.featureGroup([line, current]).addTo(routeMap);
+
+  if(!liveMapInitialized){
+    routeMap.setView(latlngs[latlngs.length-1], 17);
+    liveMapInitialized = true;
+  } else {
+    routeMap.panTo(latlngs[latlngs.length-1]);
+  }
+}
+
+/* ---------- Route view (satellite map, saved routes) ---------- */
 function showRun(run){
   nav("view");
+  viewingLiveRun = false;
   currentRun = run;
   selected = [];
   highlightedRange = [];
@@ -441,7 +660,6 @@ function showRun(run){
 
   if(!routeMap){
     routeMap = L.map("routeMap", { zoomControl: false, attributionControl: false });
-    // Satellite imagery (no street names/lines): shows green, water and houses
     L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
       maxZoom: 19
     }).addTo(routeMap);
@@ -474,7 +692,7 @@ function showRun(run){
 
 /* Click anywhere on the map -> automatically snaps to the nearest point */
 function onMapClick(e){
-  if(!displayPoints.length) return;
+  if(viewingLiveRun || !displayPoints.length) return;
   let best = -1, bestDist = Infinity;
   displayPoints.forEach((p,i)=>{
     const d = getDistance(p, { lat: e.latlng.lat, lon: e.latlng.lng });
@@ -574,6 +792,11 @@ function seedTestRoute(){
   const testRun = { start: startTs, end: startTs + n*30000, points };
   runs.unshift(testRun);
   localStorage.setItem("runs", JSON.stringify(runs));
+}
+
+/* ---------- PWA service worker (optional offline shell caching) ---------- */
+if("serviceWorker" in navigator){
+  navigator.serviceWorker.register("sw.js").catch(()=>{});
 }
 
 /* ---------- Init ---------- */

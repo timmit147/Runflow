@@ -1,21 +1,14 @@
 {
-  "name": "RunFlow Tracker",
+  "name": "RunFlow",
   "short_name": "RunFlow",
-  "description": "Een minimalistische GPS hardloop tracker",
-  "start_url": "/index.html",
-  "display": "standalone",
+  "start_url": "./RunFlow.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "portrait",
   "background_color": "#0b1220",
   "theme_color": "#0b1220",
   "icons": [
-    {
-      "src": "icon.png",
-      "sizes": "192x192",
-      "type": "image/png"
-    },
-    {
-      "src": "icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png"
-    }
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
   ]
 }
